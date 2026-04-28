@@ -73,8 +73,8 @@ EVENT_PATTERNS = [
     EventPattern(
         event_type="invalid_user",
         regex=re.compile(rf"^Invalid user (?P<username>\S+) from {IP_FRAGMENT} port (?P<port>\d+)"),
-        outcome="neutral",
-        is_attempt=False,
+        outcome="failure",
+        is_attempt=True,
     ),
     EventPattern(
         event_type="pam_auth_failure",
@@ -82,7 +82,7 @@ EVENT_PATTERNS = [
             rf"^pam_unix\(sshd:auth\): authentication failure;.*rhost={IP_FRAGMENT}\s+user=(?P<username>\S*)"
         ),
         outcome="failure",
-        is_attempt=False,
+        is_attempt=True,
     ),
     EventPattern(
         event_type="preauth_disconnect",
@@ -145,6 +145,7 @@ def _parse_message(
             host=host,
             process=process,
             pid=pid,
+            session_id=str(pid) if pid is not None else None,
             event_type=pattern.event_type,
             outcome=pattern.outcome,
             ip=ip,

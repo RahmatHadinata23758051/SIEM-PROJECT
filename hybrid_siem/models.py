@@ -11,6 +11,7 @@ class SshAuthEvent:
     host: str
     process: str
     pid: int | None
+    session_id: str | None
     event_type: str
     outcome: str
     ip: str | None
@@ -21,17 +22,32 @@ class SshAuthEvent:
 
 
 @dataclass(slots=True, frozen=True)
+class SshAuthAttempt:
+    attempt_id: str
+    timestamp: datetime
+    ip: str
+    port: int | None
+    session_id: str | None
+    outcome: str
+    primary_username: str | None
+    usernames: tuple[str, ...]
+    source_event_types: tuple[str, ...]
+    event_count: int
+
+
+@dataclass(slots=True, frozen=True)
 class FeatureRecord:
     timestamp: datetime
     ip: str
     failed_count: int
     request_rate: float
     username_variance: int
-    inter_arrival_avg: float
+    inter_arrival_avg: float | None
     failed_ratio: float
+    event_count: int
     total_attempts: int
 
-    def as_dict(self) -> dict[str, str | int | float]:
+    def as_dict(self) -> dict[str, str | int | float | None]:
         return {
             "timestamp": self.timestamp.isoformat(sep=" "),
             "ip": self.ip,
@@ -40,4 +56,5 @@ class FeatureRecord:
             "username_variance": self.username_variance,
             "inter_arrival_avg": self.inter_arrival_avg,
             "failed_ratio": self.failed_ratio,
+            "event_count": self.event_count,
         }

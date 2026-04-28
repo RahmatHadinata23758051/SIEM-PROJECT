@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from hybrid_siem.features import build_feature_records
+from hybrid_siem.normalization import build_canonical_attempts
 from hybrid_siem.parsers import parse_auth_log_file
 
 
@@ -29,6 +30,7 @@ def write_feature_dataset(rows: list[dict[str, str | int | float]], output_path:
         "username_variance",
         "inter_arrival_avg",
         "failed_ratio",
+        "event_count",
     ]
 
     with path.open("w", encoding="utf-8", newline="") as handle:
@@ -46,13 +48,14 @@ def generate_feature_dataset(
     reference_time: datetime | None = None,
 ) -> DatasetBuildResult:
     events = parse_auth_log_file(input_path, reference_time=reference_time)
-    feature_records = build_feature_records(events, window_seconds=window_seconds)
+    canonical_attempts = build_canonical_attempts(events)
+    feature_records = build_feature_records(canonical_attempts, window_seconds=window_seconds)
     rows = [record.as_dict() for record in feature_records]
     written_path = write_feature_dataset(rows, output_path)
 
     return DatasetBuildResult(
         parsed_events=len(events),
-        counted_attempts=sum(event.is_attempt for event in events),
+        counted_attempts=len(canonical_attempts),
         feature_rows=len(feature_records),
         output_path=written_path,
     )
