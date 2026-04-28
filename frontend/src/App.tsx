@@ -21,14 +21,54 @@ import Dashboard from './components/Dashboard';
 import LogExplorer from './components/LogExplorer';
 import ThreatHunting from './components/ThreatHunting';
 import NetworkMap from './components/NetworkMap';
+import { useSIEMStream } from './hooks/useSIEMStream';
+import { ShieldAlert, X } from 'lucide-react';
 
 type View = 'dashboard' | 'threat-hunting' | 'log-explorer' | 'ai-insights' | 'network-map' | 'reports';
 
 export default function App() {
   const [activeView, setActiveView] = useState<View>('dashboard');
+  const [dismissedToasts, setDismissedToasts] = useState<Set<string>>(new Set());
+
+  const { events, searchQuery, setSearchQuery } = useSIEMStream();
+  
+  // Badge: Count CRIT events
+  const critEvents = events.filter(e => e.risk_level === 'high' || e.risk_level === 'medium');
+  
+  // Toast: Show latest blocked event (risk >= 85) if not dismissed
+  const latestBlock = events.find(e => e.risk_score >= 85);
+  const showToast = latestBlock && !dismissedToasts.has(latestBlock.id);
 
   return (
-    <div className="flex h-screen bg-background text-on-surface overflow-hidden">
+    <div className="flex h-screen bg-background text-on-surface overflow-hidden relative">
+      {/* Toast Notification */}
+      <AnimatePresence>
+        {showToast && (
+          <motion.div
+            initial={{ opacity: 0, y: 50, scale: 0.9 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 20, scale: 0.9 }}
+            className="absolute bottom-6 right-6 z-50 bg-surface-container-high border border-error/40 shadow-[0_8px_30px_rgb(0,0,0,0.5)] rounded-xl p-4 min-w-[320px] flex gap-4"
+          >
+            <div className="w-10 h-10 rounded-full bg-error/20 flex items-center justify-center shrink-0">
+              <ShieldAlert className="text-error" size={20} />
+            </div>
+            <div className="flex-1">
+              <div className="flex justify-between items-start">
+                <h4 className="text-sm font-bold text-on-surface">CRITICAL THREAT BLOCKED</h4>
+                <button onClick={() => setDismissedToasts(prev => new Set(prev).add(latestBlock!.id))} className="text-on-surface-variant hover:text-on-surface">
+                  <X size={16} />
+                </button>
+              </div>
+              <p className="text-xs text-on-surface-variant mt-1">IP <span className="font-mono text-error font-bold">{latestBlock?.ip}</span> isolated.</p>
+              <div className="mt-2 text-[10px] font-mono text-on-surface-variant bg-surface-container-low p-2 rounded truncate border border-outline-variant/30">
+                {latestBlock?.reasons[0]}
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Sidebar */}
       <aside className="w-64 bg-[#0B0F14] border-r border-outline-variant/30 flex flex-col pt-6 pb-6 shrink-0">
         <div className="px-6 mb-8 flex items-center gap-3">
@@ -99,15 +139,17 @@ export default function App() {
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-on-surface-variant w-4.5 h-4.5 group-focus-within:text-primary transition-colors" />
               <input 
                 type="text" 
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="Search entity, IP, or query..." 
-                className="bg-surface-container-low border border-outline-variant rounded-lg pl-10 pr-4 py-1.5 text-sm w-full focus:outline-none focus:border-primary/50 transition-all"
+                className="bg-surface-container-low border border-outline-variant rounded-lg pl-10 pr-4 py-1.5 text-sm w-full focus:outline-none focus:border-primary/50 transition-all text-on-surface"
               />
             </div>
           </div>
 
           <div className="flex items-center gap-2">
             <NavAction icon={<BarChart3 size={20} />} />
-            <NavAction icon={<Bell size={20} />} hasBadge />
+            <NavAction icon={<Bell size={20} />} badgeCount={critEvents.length} />
             <NavAction icon={<Settings size={20} />} />
             <div className="w-px h-6 bg-outline-variant/30 mx-2" />
             <button className="bg-primary hover:bg-primary-container text-on-primary px-4 py-1.5 rounded-lg font-semibold text-sm transition-all shadow-[0_0_15px_rgba(173,198,255,0.2)] flex items-center gap-2">
@@ -170,11 +212,15 @@ function NavItem({ icon, label, active, onClick }: { icon: React.ReactNode, labe
   );
 }
 
-function NavAction({ icon, hasBadge }: { icon: React.ReactNode, hasBadge?: boolean }) {
+function NavAction({ icon, badgeCount }: { icon: React.ReactNode, badgeCount?: number }) {
   return (
     <button className="p-2 text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-all rounded-lg relative">
       {icon}
-      {hasBadge && <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-primary rounded-full shadow-[0_0_8px_#adc6ff]" />}
+      {!!badgeCount && badgeCount > 0 && (
+        <span className="absolute top-1 right-1 px-1 min-w-[14px] h-[14px] bg-error rounded-full text-[8px] font-bold text-on-error flex items-center justify-center shadow-[0_0_8px_#ffb4ab]">
+          {badgeCount > 99 ? '99+' : badgeCount}
+        </span>
+      )}
     </button>
   );
 }

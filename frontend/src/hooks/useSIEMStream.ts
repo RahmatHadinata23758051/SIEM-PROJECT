@@ -1,11 +1,10 @@
 /**
  * src/hooks/useSIEMStream.ts
  * ──────────────────────────────────────────────────────────────────────────────
- * Shared hook — live-streaming SIEM events at configurable interval.
- * All components that need live data MUST use this hook.
+ * Shared hook & context — live-streaming SIEM events globally.
  * ──────────────────────────────────────────────────────────────────────────────
  */
-import { useState, useEffect, useRef, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import {
   generateSIEMEvent,
   generateEventBatch,
@@ -22,36 +21,35 @@ export interface SIEMStreamState {
   telemetry: TelemetryPoint[];
   isStreaming: boolean;
   lastUpdated: Date | null;
-  /** Manually pause / resume the stream */
+  searchQuery: string;
+  setSearchQuery: (q: string) => void;
   setStreaming: (v: boolean) => void;
-  /** Force a full data refresh */
   refresh: () => void;
 }
 
-interface UseSIEMStreamOptions {
-  /** Interval in ms between new events (default 2000) */
+const SIEMContext = createContext<SIEMStreamState | null>(null);
+
+interface SIEMProviderProps {
+  children: React.ReactNode;
   intervalMs?: number;
-  /** Max events to keep in buffer (default 50) */
   maxEvents?: number;
-  /** Initial batch size (default 15) */
   initialBatch?: number;
-  /** Auto-start streaming (default true) */
   autoStart?: boolean;
 }
 
-export function useSIEMStream(options: UseSIEMStreamOptions = {}): SIEMStreamState {
-  const {
-    intervalMs   = 2000,
-    maxEvents    = 50,
-    initialBatch = 15,
-    autoStart    = true,
-  } = options;
-
-  const [events,      setEvents]      = useState<SIEMEvent[]>(() => generateEventBatch(initialBatch));
-  const [metrics,     setMetrics]     = useState<SystemMetrics>(() => getSystemMetrics());
-  const [telemetry,   setTelemetry]   = useState<TelemetryPoint[]>(() => getTelemetryHistory(12));
-  const [isStreaming, setIsStreaming]  = useState(autoStart);
+export function SIEMProvider({
+  children,
+  intervalMs = 2000,
+  maxEvents = 80,
+  initialBatch = 20,
+  autoStart = true,
+}: SIEMProviderProps) {
+  const [events, setEvents] = useState<SIEMEvent[]>(() => generateEventBatch(initialBatch));
+  const [metrics, setMetrics] = useState<SystemMetrics>(() => getSystemMetrics());
+  const [telemetry, setTelemetry] = useState<TelemetryPoint[]>(() => getTelemetryHistory(12));
+  const [isStreaming, setIsStreaming] = useState(autoStart);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
 
   const tickRef = useRef(0);
 
@@ -80,7 +78,7 @@ export function useSIEMStream(options: UseSIEMStreamOptions = {}): SIEMStreamSta
       // Append a new telemetry point every 15 ticks (~30 s)
       if (tickRef.current % 15 === 0) {
         const now = new Date();
-        const label = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
+        const label = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
         setTelemetry(prev => [
           ...prev.slice(-11),
           { time: label, volume: Math.floor(Math.random() * 4500 + 1500), risk: Math.floor(Math.random() * 9000 + 800) },
@@ -93,13 +91,17 @@ export function useSIEMStream(options: UseSIEMStreamOptions = {}): SIEMStreamSta
     return () => clearInterval(id);
   }, [isStreaming, intervalMs, maxEvents]);
 
-  return {
-    events,
-    metrics,
-    telemetry,
-    isStreaming,
-    lastUpdated,
-    setStreaming: setIsStreaming,
-    refresh,
-  };
+  return (
+    <SIEMContext.Provider value={{ events, metrics, telemetry, isStreaming, lastUpdated, searchQuery, setSearchQuery, setStreaming: setIsStreaming, refresh }}>
+      {children}
+    </SIEMContext.Provider>
+  );
+}
+
+export function useSIEMStream(options?: any): SIEMStreamState {
+  const context = useContext(SIEMContext);
+  if (!context) {
+    throw new Error('useSIEMStream must be used within a SIEMProvider');
+  }
+  return context;
 }

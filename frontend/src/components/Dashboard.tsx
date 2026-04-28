@@ -9,11 +9,7 @@ import { formatLogLine, type SIEMEvent } from '../lib/api';
 // ─── Dashboard ────────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
-  const { events, metrics, telemetry, isStreaming, setStreaming } = useSIEMStream({
-    intervalMs:   2000,
-    maxEvents:    30,
-    initialBatch: 12,
-  });
+  const { events, metrics, telemetry, isStreaming, setStreaming } = useSIEMStream();
 
   const streamRef = useRef<HTMLDivElement>(null);
 
@@ -92,10 +88,26 @@ export default function Dashboard() {
               <MoreHorizontal size={18} />
             </button>
           </div>
-          <div className="p-6 flex-1 flex flex-col gap-8 justify-center">
+          <div className="p-6 flex flex-col gap-6">
             <RiskItem label="High Risk Nodes"      percentage={pctHigh}     count={metrics.high_risk_count}         color="bg-error" />
             <RiskItem label="Elevated Anomalies"   percentage={pctElevated} count={metrics.elevated_anomaly_count}  color="bg-tertiary" />
             <RiskItem label="Baseline Operations"  percentage={pctBaseline} count={metrics.baseline_count}          color="bg-primary" />
+          </div>
+          <div className="mt-auto p-4 border-t border-outline-variant/30 h-40">
+            <h4 className="text-xs font-semibold text-on-surface-variant uppercase tracking-wider mb-2">Telemetry Volume</h4>
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={telemetry}>
+                <defs>
+                  <linearGradient id="colorVol" x1="0" y1="0" x2="0" y2="100%">
+                    <stop offset="5%" stopColor="#adc6ff" stopOpacity={0.3} />
+                    <stop offset="95%" stopColor="#adc6ff" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <XAxis dataKey="time" hide />
+                <Tooltip contentStyle={{ backgroundColor: '#1d2027', borderColor: '#424754', fontSize: '10px' }} />
+                <Area type="monotone" dataKey="volume" stroke="#adc6ff" strokeWidth={2} fillOpacity={1} fill="url(#colorVol)" />
+              </AreaChart>
+            </ResponsiveContainer>
           </div>
         </div>
 

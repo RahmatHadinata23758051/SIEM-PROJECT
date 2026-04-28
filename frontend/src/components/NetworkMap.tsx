@@ -13,7 +13,7 @@ import { useSIEMStream } from '../hooks/useSIEMStream';
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function NetworkMap() {
-  const { events } = useSIEMStream({ intervalMs: 3000, maxEvents: 20, initialBatch: 10 });
+  const { events } = useSIEMStream();
 
   // Derive network nodes from latest events + static layout
   const nodes = useMemo(() => getNetworkNodes(5), []);

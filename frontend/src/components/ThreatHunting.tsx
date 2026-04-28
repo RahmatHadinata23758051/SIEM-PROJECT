@@ -15,11 +15,7 @@ import { getHuntingResults, type HuntingResult } from '../lib/api';
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function ThreatHunting() {
-  const { events, telemetry } = useSIEMStream({
-    intervalMs:   3000,
-    maxEvents:    30,
-    initialBatch: 15,
-  });
+  const { events, telemetry } = useSIEMStream();
 
   // Pick highest-risk IP from live events as the "active incident"
   const target: HuntingResult | null = useMemo(() => {

@@ -67,27 +67,32 @@ function toLog(event: SIEMEvent): Log {
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function LogExplorer() {
-  const { events, isStreaming, setStreaming } = useSIEMStream({
-    intervalMs:   1500,
-    maxEvents:    80,
-    initialBatch: 20,
-  });
+  const { events, isStreaming, setStreaming, searchQuery, setSearchQuery } = useSIEMStream();
 
   const [expandedLog, setExpandedLog] = useState<string | null>(null);
-  const [query,       setQuery]       = useState('');
   const [severity,    setSeverity]    = useState<Severity>('ALL');
+  const [page,        setPage]        = useState(1);
+  const itemsPerPage = 15;
 
   const logs: Log[] = useMemo(() => events.map(toLog), [events]);
 
-  const filtered = useMemo(() => logs.filter(log => {
-    const matchSev = severity === 'ALL' || log.severity === severity;
-    const q = query.toLowerCase();
-    const matchQ = !q
-      || log.sourceIp.includes(q)
-      || log.message.toLowerCase().includes(q)
-      || log.severity.toLowerCase().includes(q);
-    return matchSev && matchQ;
-  }), [logs, query, severity]);
+  const filtered = useMemo(() => {
+    // Reset page on filter change
+    setPage(1);
+    return logs.filter(log => {
+      const matchSev = severity === 'ALL' || log.severity === severity;
+      const q = searchQuery.toLowerCase();
+      const matchQ = !q
+        || log.sourceIp.includes(q)
+        || log.message.toLowerCase().includes(q)
+        || log.severity.toLowerCase().includes(q);
+      return matchSev && matchQ;
+    });
+  }, [logs, searchQuery, severity]);
+
+  const paginatedLogs = useMemo(() => {
+    return filtered.slice(0, page * itemsPerPage);
+  }, [filtered, page]);
 
   // Export visible logs as JSON
   const handleExport = () => {
@@ -154,8 +159,8 @@ export default function LogExplorer() {
             <Terminal size={18} className="text-on-surface-variant" />
             <input
               type="text"
-              value={query}
-              onChange={e => setQuery(e.target.value)}
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
               placeholder="Filter by IP, severity, or message..."
               className="bg-transparent border-none w-full text-sm font-mono text-on-surface focus:ring-0 placeholder-on-surface-variant/50 outline-none"
             />
@@ -181,7 +186,7 @@ export default function LogExplorer() {
               No events match your filter.
             </div>
           )}
-          {filtered.map((log) => (
+          {paginatedLogs.map((log) => (
             <div key={log.id} className="flex flex-col border-b border-outline-variant/10">
               <div
                 onClick={() => setExpandedLog(expandedLog === log.id ? null : log.id)}
@@ -258,6 +263,16 @@ export default function LogExplorer() {
               </AnimatePresence>
             </div>
           ))}
+          {paginatedLogs.length < filtered.length && (
+            <div className="p-4 flex justify-center">
+              <button 
+                onClick={() => setPage(p => p + 1)}
+                className="px-6 py-2 bg-surface-container-high border border-outline-variant/30 rounded-lg text-xs font-bold uppercase tracking-widest hover:bg-surface-container-highest transition-colors"
+              >
+                Load More Events
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </div>
