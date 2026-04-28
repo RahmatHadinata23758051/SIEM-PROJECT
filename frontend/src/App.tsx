@@ -21,6 +21,8 @@ import Dashboard from './components/Dashboard';
 import LogExplorer from './components/LogExplorer';
 import ThreatHunting from './components/ThreatHunting';
 import NetworkMap from './components/NetworkMap';
+import AIInsights from './components/AIInsights';
+import Reports from './components/Reports';
 import { useSIEMStream } from './hooks/useSIEMStream';
 import { ShieldAlert, X, ShieldCheck, Activity, Globe, MapPin } from 'lucide-react';
 
@@ -244,7 +246,9 @@ export default function App() {
               {activeView === 'log-explorer' && <LogExplorer />}
               {activeView === 'threat-hunting' && <ThreatHunting />}
               {activeView === 'network-map' && <NetworkMap onNavigate={setActiveView} />}
-              {(activeView !== 'dashboard' && activeView !== 'log-explorer' && activeView !== 'threat-hunting' && activeView !== 'network-map') && (
+              {activeView === 'ai-insights' && <AIInsights />}
+              {activeView === 'reports' && <Reports />}
+              {(activeView !== 'dashboard' && activeView !== 'log-explorer' && activeView !== 'threat-hunting' && activeView !== 'network-map' && activeView !== 'ai-insights' && activeView !== 'reports') && (
                 <div className="p-8 text-center text-on-surface-variant flex flex-col items-center justify-center h-full gap-4">
                   <Activity size={48} className="text-outline-variant" />
                   <p className="text-xl font-medium">This module is under construction</p>
