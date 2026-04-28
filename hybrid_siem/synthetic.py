@@ -375,15 +375,17 @@ class SyntheticSshLogGenerator:
 
     def _maybe_start_campaigns(self, minute: datetime) -> list[ThreatCampaign]:
         campaigns: list[ThreatCampaign] = []
-        bruteforce_prob = 0.004 if self.behavior_profile == "mixed" else 0.045
-        spray_prob = 0.0018 if self.behavior_profile == "mixed" else 0.022
+        aggressive_prob = 0.004 if self.behavior_profile == "mixed" else 0.045
+        slow_prob = 0.003 if self.behavior_profile == "mixed" else 0.014
+        single_username_prob = 0.0025 if self.behavior_profile == "mixed" else 0.02
+        distributed_prob = 0.002 if self.behavior_profile == "mixed" else 0.022
         scanner_prob = 0.0035 if self.behavior_profile == "mixed" else 0.038
         stuffing_prob = 0.0013 if self.behavior_profile == "mixed" else 0.016
 
-        if self.rng.random() < bruteforce_prob:
+        if self.rng.random() < aggressive_prob:
             campaigns.append(
                 ThreatCampaign(
-                    kind="bruteforce",
+                    kind="aggressive_bruteforce",
                     source_ips=(self.rng.choice(self.attack_ip_pool),),
                     usernames=tuple(
                         self.rng.sample(
@@ -396,10 +398,38 @@ class SyntheticSshLogGenerator:
                     + timedelta(minutes=self.rng.randint(8, 28) if self.behavior_profile == "mixed" else self.rng.randint(18, 48)),
                 )
             )
-        if self.rng.random() < spray_prob:
+        if self.rng.random() < slow_prob:
             campaigns.append(
                 ThreatCampaign(
-                    kind="password_spray",
+                    kind="slow_bruteforce",
+                    source_ips=(self.rng.choice(self.attack_ip_pool),),
+                    usernames=tuple(
+                        self.rng.sample(
+                            self.attack_username_pool,
+                            k=self.rng.randint(1, 3) if self.behavior_profile == "mixed" else self.rng.randint(2, 4),
+                        )
+                    ),
+                    known_targets=tuple(self.rng.sample(self.attackable_users, k=2)),
+                    end_time=minute
+                    + timedelta(minutes=self.rng.randint(90, 240) if self.behavior_profile == "mixed" else self.rng.randint(120, 360)),
+                )
+            )
+        if self.rng.random() < single_username_prob:
+            target_username = self.rng.choice(self.attackable_users if self.behavior_profile == "mixed" else ATTACK_USERNAMES)
+            campaigns.append(
+                ThreatCampaign(
+                    kind="single_username_attack",
+                    source_ips=(self.rng.choice(self.attack_ip_pool),),
+                    usernames=(target_username,),
+                    known_targets=(target_username,) if target_username in self.identity_index else tuple(),
+                    end_time=minute
+                    + timedelta(minutes=self.rng.randint(18, 80) if self.behavior_profile == "mixed" else self.rng.randint(35, 140)),
+                )
+            )
+        if self.rng.random() < distributed_prob:
+            campaigns.append(
+                ThreatCampaign(
+                    kind="distributed_attack",
                     source_ips=tuple(
                         self.rng.sample(
                             self.attack_ip_pool,
@@ -469,10 +499,15 @@ class SyntheticSshLogGenerator:
 
         benign_window_count = self._choose_benign_window_count(minute)
         for _ in range(benign_window_count):
-            if self.rng.random() < 0.12:
+            activity_roll = self.rng.random()
+            if activity_roll < 0.07:
                 ip, sequence = self._build_shared_vpn_activity(minute)
-            elif self.rng.random() < 0.08:
+            elif activity_roll < 0.14:
                 ip, sequence = self._build_noisy_automation_activity(minute)
+            elif activity_roll < 0.18:
+                ip, sequence = self._build_new_ip_login_activity(minute)
+            elif activity_roll < 0.22:
+                ip, sequence = self._build_admin_script_burst(minute)
             else:
                 identity = self._select_identity_for_minute(minute)
                 ip, sequence = self._build_identity_activity(identity, minute)
@@ -545,6 +580,9 @@ class SyntheticSshLogGenerator:
                 k=1,
             )[0]
 
+        if self.behavior_profile == "mixed" and self.rng.random() < 0.06:
+            schedule = self.rng.choice([candidate for candidate in self.identity_by_schedule if candidate != schedule])
+
         return self.rng.choice(self.identity_by_schedule[schedule])
 
     def _pick_identity_ip(self, identity: SyntheticIdentity) -> str:
@@ -595,6 +633,41 @@ class SyntheticSshLogGenerator:
             )
         return ip, sequence
 
+    def _build_new_ip_login_activity(self, minute: datetime) -> tuple[str, list[tuple[int, str]]]:
+        identity = self.rng.choice([item for item in self.identities if item.role in {"employee", "contractor", "admin"}])
+        unusual_public = self.rng.random() < 0.55
+        candidate_pool = self.remote_public_pool if unusual_public else self.office_private_pool
+        ip = self.rng.choice(candidate_pool)
+        while ip in {identity.primary_ip, identity.secondary_ip}:
+            ip = self.rng.choice(candidate_pool)
+
+        failure_count = 1 if self.rng.random() < 0.42 else 0
+        success_count = 1
+        offsets = self._spread_offsets(failure_count + success_count, 3, 55)
+        sequence: list[tuple[int, str]] = []
+        offset_index = 0
+        for _ in range(failure_count):
+            port = self._next_port()
+            sequence.append((offsets[offset_index], self._failed_password_message(identity.username, ip, port)))
+            if self.rng.random() < 0.25:
+                sequence.append((min(59, offsets[offset_index] + 1), self._pam_failure_message(identity.username, ip)))
+            offset_index += 1
+
+        sequence.append((offsets[offset_index], self._accepted_message(identity, ip, self._next_port())))
+        return ip, sequence
+
+    def _build_admin_script_burst(self, minute: datetime) -> tuple[str, list[tuple[int, str]]]:
+        del minute
+        identity = self.rng.choice([item for item in self.identities if item.role in {"admin", "service"}])
+        ip = identity.primary_ip if identity.role == "service" else self._pick_identity_ip(identity)
+        success_count = self.rng.randint(4, 10)
+        offsets = self._spread_offsets(success_count, 0, 56)
+        sequence = [(offset, self._accepted_message(identity, ip, self._next_port())) for offset in offsets]
+        if self.rng.random() < 0.2:
+            typo_offset = min(59, offsets[0] + 1)
+            sequence.append((typo_offset, self._failed_password_message(identity.username, ip, self._next_port())))
+        return ip, sequence
+
     def _generate_human_sequence(
         self,
         identity: SyntheticIdentity,
@@ -602,11 +675,13 @@ class SyntheticSshLogGenerator:
         minute: datetime,
         forced_offset: int | None = None,
     ) -> list[tuple[int, str]]:
-        del minute
         sequence: list[tuple[int, str]] = []
         failure_count = 0
+        is_unusual_hour = minute.hour < 6 or minute.hour >= 22
         base_failure_probability = 0.14 if self.behavior_profile == "mixed" else 0.45
         multi_failure_probability = 0.035 if self.behavior_profile == "mixed" else 0.16
+        if self.behavior_profile == "mixed" and is_unusual_hour and identity.role in {"employee", "contractor"}:
+            base_failure_probability += 0.08
 
         if self.rng.random() < base_failure_probability:
             failure_count = 1
@@ -616,7 +691,7 @@ class SyntheticSshLogGenerator:
         if self.behavior_profile == "honeypot":
             success_count = 1 if self.rng.random() < 0.18 else 0
         else:
-            success_count = 1 if self.rng.random() < 0.88 else 2
+            success_count = 1 if self.rng.random() < (0.82 if is_unusual_hour else 0.88) else 2
         total_markers = max(1, failure_count + success_count)
         offsets = self._spread_offsets(total_markers, forced_offset, 58)
 
@@ -684,13 +759,19 @@ class SyntheticSshLogGenerator:
         campaign: ThreatCampaign,
         minute: datetime,
     ) -> list[tuple[str, list[tuple[int, str]]]]:
-        if campaign.kind == "bruteforce":
+        if campaign.kind == "aggressive_bruteforce":
             ip = campaign.source_ips[0]
             return [(ip, self._generate_bruteforce_sequence(ip, campaign))]
-        if campaign.kind == "password_spray":
+        if campaign.kind == "slow_bruteforce":
+            ip = campaign.source_ips[0]
+            return [(ip, self._generate_slow_bruteforce_sequence(ip, campaign, minute))]
+        if campaign.kind == "single_username_attack":
+            ip = campaign.source_ips[0]
+            return [(ip, self._generate_single_username_sequence(ip, campaign))]
+        if campaign.kind == "distributed_attack":
             active_ip_count = min(len(campaign.source_ips), self.rng.randint(2, 6))
             selected_ips = self.rng.sample(list(campaign.source_ips), k=active_ip_count)
-            return [(ip, self._generate_password_spray_sequence(ip, campaign)) for ip in selected_ips]
+            return [(ip, self._generate_distributed_attack_sequence(ip, campaign, minute)) for ip in selected_ips]
         if campaign.kind == "scanner":
             ip = campaign.source_ips[0]
             if minute.minute % self.rng.randint(2, 5) != 0:
@@ -733,6 +814,65 @@ class SyntheticSshLogGenerator:
             closing_user = self.rng.choice(usernames)
             sequence.append((59, self._disconnect_message("authenticating", closing_user, ip, self._next_port())))
 
+        return sequence
+
+    def _generate_slow_bruteforce_sequence(
+        self,
+        ip: str,
+        campaign: ThreatCampaign,
+        minute: datetime,
+    ) -> list[tuple[int, str]]:
+        del minute
+        attempt_count = self.rng.randint(1, 3)
+        offsets = self._spread_offsets(attempt_count, self.rng.randint(8, 32), 58)
+        sequence: list[tuple[int, str]] = []
+        for offset in offsets:
+            username = self.rng.choice(campaign.usernames)
+            port = self._next_port()
+            if username not in self.identity_index and self.rng.random() < 0.7:
+                sequence.append((offset, self._invalid_user_message(username, ip, port)))
+                offset = min(59, offset + 1)
+                sequence.append((offset, self._failed_password_message(username, ip, port, invalid_user=True)))
+            else:
+                sequence.append((offset, self._failed_password_message(username, ip, port)))
+            if self.rng.random() < 0.35:
+                sequence.append((min(59, offset + 1), self._pam_failure_message(username, ip)))
+        return sequence
+
+    def _generate_single_username_sequence(
+        self,
+        ip: str,
+        campaign: ThreatCampaign,
+    ) -> list[tuple[int, str]]:
+        target_username = campaign.usernames[0]
+        attempt_count = self.rng.randint(8, 20) if self.behavior_profile == "mixed" else self.rng.randint(12, 28)
+        offsets = self._spread_offsets(attempt_count, 0, 58)
+        sequence: list[tuple[int, str]] = []
+        for offset in offsets:
+            port = self._next_port()
+            sequence.append((offset, self._failed_password_message(target_username, ip, port)))
+            if self.rng.random() < 0.32:
+                sequence.append((min(59, offset + 1), self._pam_failure_message(target_username, ip)))
+        return sequence
+
+    def _generate_distributed_attack_sequence(
+        self,
+        ip: str,
+        campaign: ThreatCampaign,
+        minute: datetime,
+    ) -> list[tuple[int, str]]:
+        del minute
+        attempt_count = self.rng.randint(2, 5) if self.behavior_profile == "mixed" else self.rng.randint(3, 7)
+        offsets = self._spread_offsets(attempt_count, 0, 56)
+        sequence: list[tuple[int, str]] = []
+        usernames = self.rng.sample(list(campaign.usernames), k=min(attempt_count, len(campaign.usernames)))
+        while len(usernames) < attempt_count:
+            usernames.append(self.rng.choice(campaign.usernames))
+        for offset, username in zip(offsets, usernames):
+            port = self._next_port()
+            sequence.append((offset, self._failed_password_message(username, ip, port)))
+            if self.rng.random() < 0.22:
+                sequence.append((min(59, offset + 1), self._pam_failure_message(username, ip)))
         return sequence
 
     def _generate_password_spray_sequence(
