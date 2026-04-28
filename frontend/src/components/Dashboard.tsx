@@ -9,7 +9,7 @@ import { formatLogLine, type SIEMEvent } from '../lib/api';
 // ─── Dashboard ────────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
-  const { events, metrics, telemetry, isStreaming, setStreaming } = useSIEMStream();
+  const { events, metrics, telemetry, isStreaming, setStreaming, clearEvents } = useSIEMStream();
 
   const streamRef = useRef<HTMLDivElement>(null);
 
@@ -118,13 +118,21 @@ export default function Dashboard() {
               <Terminal size={18} className="text-primary" />
               Live Event Stream
             </h3>
-            <div className="bg-surface-container-highest px-2 py-0.5 rounded text-[10px] font-bold text-on-surface-variant uppercase tracking-widest">
-              {isStreaming ? 'Auto-Scroll On' : 'Stream Paused'}
+            <div className="flex items-center gap-2">
+              <button
+                onClick={clearEvents}
+                className="text-[10px] font-bold text-on-surface-variant hover:text-error transition-colors uppercase tracking-widest px-2 py-0.5 rounded border border-outline-variant/30 hover:border-error/30"
+              >
+                Clear
+              </button>
+              <div className="bg-surface-container-highest px-2 py-0.5 rounded text-[10px] font-bold text-on-surface-variant uppercase tracking-widest">
+                {isStreaming ? 'Auto-Scroll On' : 'Stream Paused'}
+              </div>
             </div>
           </div>
           <div
             ref={streamRef}
-            className="flex-1 bg-surface-container-lowest/80 p-4 overflow-y-auto font-mono text-xs space-y-2"
+            className="h-[450px] bg-surface-container-lowest/80 p-4 overflow-y-auto font-mono text-xs space-y-2 scrollbar-thin scrollbar-thumb-outline-variant/30 scrollbar-track-transparent"
           >
             {events.map(event => {
               const line = formatLogLine(event);

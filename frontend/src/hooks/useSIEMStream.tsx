@@ -28,6 +28,7 @@ export interface SIEMStreamState {
   setSelectedIp: (ip: string | null) => void;
   setStreaming: (v: boolean) => void;
   refresh: () => void;
+  clearEvents: () => void;
   connectionStatus: ConnectionStatus;
 }
 
@@ -73,6 +74,10 @@ export function SIEMProvider({
       console.error(e);
     }
     setLastUpdated(new Date());
+  }, []);
+
+  const clearEvents = useCallback(() => {
+    setEvents([]);
   }, []);
 
   // Fetch initial metrics
@@ -154,7 +159,7 @@ export function SIEMProvider({
   }, [isStreaming, maxEvents, refresh]);
 
   return (
-    <SIEMContext.Provider value={{ events, metrics, telemetry, isStreaming, lastUpdated, searchQuery, setSearchQuery, selectedIp, setSelectedIp, setStreaming: setIsStreaming, refresh, connectionStatus }}>
+    <SIEMContext.Provider value={{ events, metrics, telemetry, isStreaming, lastUpdated, searchQuery, setSearchQuery, selectedIp, setSelectedIp, setStreaming: setIsStreaming, refresh, clearEvents, connectionStatus }}>
       {children}
     </SIEMContext.Provider>
   );
