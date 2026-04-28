@@ -1,0 +1,14 @@
+Apr 28 10:00:01 ubuntu sshd[1001]: Failed password for invalid user admin from 192.168.56.10 port 55212 ssh2
+Apr 28 10:00:03 ubuntu sshd[1002]: Failed password for root from 192.168.56.10 port 55215 ssh2
+Apr 28 10:00:05 ubuntu sshd[1003]: Failed password for root from 192.168.56.10 port 55216 ssh2
+Apr 28 10:00:08 ubuntu sshd[1004]: Failed password for invalid user test from 192.168.56.10 port 55220 ssh2
+Apr 28 10:00:20 ubuntu sshd[1005]: Accepted password for analyst from 10.10.10.4 port 49912 ssh2
+Apr 28 10:00:40 ubuntu sshd[1006]: Failed password for root from 192.168.56.10 port 55230 ssh2
+Apr 28 10:01:02 ubuntu sshd[1007]: Failed password for invalid user oracle from 192.168.56.10 port 55235 ssh2
+Apr 28 10:01:06 ubuntu sshd[1008]: Failed password for invalid user deploy from 192.168.56.10 port 55240 ssh2
+Apr 28 10:01:20 ubuntu sshd[1009]: Accepted publickey for ubuntu from 10.10.10.4 port 49920 ssh2
+Apr 28 10:01:35 ubuntu sshd[1010]: Invalid user guest from 172.16.0.7 port 60001
+Apr 28 10:01:36 ubuntu sshd[1011]: Failed password for invalid user guest from 172.16.0.7 port 60001 ssh2
+Apr 28 10:01:39 ubuntu sshd[1012]: Failed password for invalid user guest from 172.16.0.7 port 60002 ssh2
+Apr 28 10:01:45 ubuntu sshd[1013]: pam_unix(sshd:auth): authentication failure; logname= uid=0 euid=0 tty=ssh ruser= rhost=172.16.0.7  user=guest
+Apr 28 10:02:02 ubuntu sshd[1014]: Connection closed by authenticating user root 192.168.56.10 port 55242 [preauth]
