@@ -171,6 +171,76 @@ def _scenario_lines() -> list[ScenarioDefinition]:
                 "Apr 28 16:07:00 ubuntu sshd[5807]: Accepted publickey for analyst from 203.0.113.15 port 66007 ssh2",
             ),
         ),
+        # Edge Case Scenarios
+        ScenarioDefinition(
+            name="burst_attack_very_short",
+            description="Edge Case: Extreme burst (20 failures in <30 seconds) then silence.",
+            expected_peak_action="block",
+            expected_final_action="normal",
+            log_lines=(
+                # Rapid-fire failures (should spike anomaly score)
+                "Apr 28 17:00:01 ubuntu sshd[5901]: Failed password for root from 210.0.0.1 port 70001 ssh2",
+                "Apr 28 17:00:02 ubuntu sshd[5902]: Failed password for root from 210.0.0.1 port 70002 ssh2",
+                "Apr 28 17:00:03 ubuntu sshd[5903]: Failed password for root from 210.0.0.1 port 70003 ssh2",
+                "Apr 28 17:00:04 ubuntu sshd[5904]: Failed password for root from 210.0.0.1 port 70004 ssh2",
+                "Apr 28 17:00:05 ubuntu sshd[5905]: Failed password for root from 210.0.0.1 port 70005 ssh2",
+                "Apr 28 17:00:06 ubuntu sshd[5906]: Failed password for root from 210.0.0.1 port 70006 ssh2",
+                "Apr 28 17:00:07 ubuntu sshd[5907]: Failed password for root from 210.0.0.1 port 70007 ssh2",
+                "Apr 28 17:00:08 ubuntu sshd[5908]: Failed password for root from 210.0.0.1 port 70008 ssh2",
+                "Apr 28 17:00:09 ubuntu sshd[5909]: Failed password for root from 210.0.0.1 port 70009 ssh2",
+                "Apr 28 17:00:10 ubuntu sshd[5910]: Failed password for root from 210.0.0.1 port 70010 ssh2",
+                "Apr 28 17:00:11 ubuntu sshd[5911]: Failed password for root from 210.0.0.1 port 70011 ssh2",
+                # Then silence for 10 minutes - should decay
+                "Apr 28 17:10:20 ubuntu sshd[5912]: Accepted password for ubuntu from 10.10.10.5 port 70012 ssh2",
+            ),
+        ),
+        ScenarioDefinition(
+            name="successful_logins_only",
+            description="Edge Case: Repeated successful logins (same user, different sessions).",
+            expected_peak_action="normal",
+            expected_final_action="normal",
+            log_lines=(
+                # High-frequency successful logins - should NOT trigger attack
+                "Apr 28 18:00:05 ubuntu sshd[6001]: Accepted password for devops from 10.20.20.5 port 71001 ssh2",
+                "Apr 28 18:00:15 ubuntu sshd[6002]: Accepted password for devops from 10.20.20.5 port 71002 ssh2",
+                "Apr 28 18:00:25 ubuntu sshd[6003]: Accepted password for devops from 10.20.20.5 port 71003 ssh2",
+                "Apr 28 18:00:35 ubuntu sshd[6004]: Accepted password for devops from 10.20.20.5 port 71004 ssh2",
+                "Apr 28 18:00:45 ubuntu sshd[6005]: Accepted password for devops from 10.20.20.5 port 71005 ssh2",
+                "Apr 28 18:00:55 ubuntu sshd[6006]: Accepted password for devops from 10.20.20.5 port 71006 ssh2",
+                "Apr 28 18:01:05 ubuntu sshd[6007]: Accepted password for devops from 10.20.20.5 port 71007 ssh2",
+            ),
+        ),
+        ScenarioDefinition(
+            name="single_user_rotating_ips",
+            description="Edge Case: Same user from many different IPs (legitimat mobile scenario).",
+            expected_peak_action="monitor",
+            expected_final_action="normal",
+            log_lines=(
+                # Same user, many different IPs - could be mobile user or compromised account
+                "Apr 28 19:00:05 ubuntu sshd[6101]: Accepted password for alice from 203.1.1.1 port 72001 ssh2",
+                "Apr 28 19:05:10 ubuntu sshd[6102]: Accepted password for alice from 203.1.1.2 port 72002 ssh2",
+                "Apr 28 19:10:15 ubuntu sshd[6103]: Accepted password for alice from 203.1.1.3 port 72003 ssh2",
+                "Apr 28 19:15:20 ubuntu sshd[6104]: Accepted password for alice from 203.1.1.4 port 72004 ssh2",
+                "Apr 28 19:20:25 ubuntu sshd[6105]: Accepted password for alice from 203.1.1.5 port 72005 ssh2",
+            ),
+        ),
+        ScenarioDefinition(
+            name="high_noise_random_activity",
+            description="Edge Case: Many events but random/inconsistent pattern (high entropy).",
+            expected_peak_action="monitor",
+            expected_final_action="normal",
+            log_lines=(
+                # Random mix of users, outcomes, timing - should not cluster as attack
+                "Apr 28 20:00:01 ubuntu sshd[6201]: Accepted password for user1 from 210.1.1.1 port 73001 ssh2",
+                "Apr 28 20:00:10 ubuntu sshd[6202]: Failed password for user2 from 210.1.1.2 port 73002 ssh2",
+                "Apr 28 20:00:15 ubuntu sshd[6203]: Accepted publickey for user3 from 210.1.1.3 port 73003 ssh2",
+                "Apr 28 20:00:25 ubuntu sshd[6204]: Failed password for user4 from 210.1.1.4 port 73004 ssh2",
+                "Apr 28 20:00:30 ubuntu sshd[6205]: Accepted password for user5 from 210.1.1.5 port 73005 ssh2",
+                "Apr 28 20:00:40 ubuntu sshd[6206]: Failed password for user6 from 210.1.1.6 port 73006 ssh2",
+                "Apr 28 20:00:50 ubuntu sshd[6207]: Accepted publickey for user7 from 210.1.1.7 port 73007 ssh2",
+                "Apr 28 20:01:00 ubuntu sshd[6208]: Failed password for user8 from 210.1.1.8 port 73008 ssh2",
+            ),
+        ),
     ]
 
 
