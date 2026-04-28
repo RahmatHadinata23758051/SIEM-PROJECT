@@ -5,8 +5,14 @@ from dataclasses import dataclass
 
 @dataclass(slots=True, frozen=True)
 class RiskWeights:
-    rule_weight: float = 0.75
-    anomaly_weight: float = 0.25
+    rule_weight: float = 1.00
+    anomaly_weight: float = 0.30
+
+    def validate(self) -> None:
+        if self.rule_weight < 0 or self.anomaly_weight < 0:
+            raise ValueError("risk weights must be non-negative")
+        if self.rule_weight == 0 and self.anomaly_weight == 0:
+            raise ValueError("at least one risk weight must be greater than zero")
 
 
 @dataclass(slots=True, frozen=True)
@@ -33,10 +39,12 @@ def compute_risk_score(
     weights: RiskWeights | None = None,
 ) -> RiskScoreResult:
     weights = weights or RiskWeights()
+    weights.validate()
     if anomaly_score is None:
         combined = rule_score
     else:
-        combined = (rule_score * weights.rule_weight) + ((anomaly_score * 100.0) * weights.anomaly_weight)
+        bounded_anomaly_score = max(0.0, min(1.0, anomaly_score))
+        combined = (rule_score * weights.rule_weight) + ((bounded_anomaly_score * 100.0) * weights.anomaly_weight)
 
     bounded_score = max(0.0, min(100.0, round(combined, 2)))
     return RiskScoreResult(

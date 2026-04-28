@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import json
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 from hybrid_siem.calibration import calibrate_rule_thresholds_from_normal
 from hybrid_siem.evaluation import generate_evaluation_bundle
+from hybrid_siem.features import build_feature_records
+from hybrid_siem.parsers import parse_auth_log_file
 from hybrid_siem.scenarios import build_scenario_feature_sets
+from hybrid_siem.synthetic import SyntheticSshLogGenerator
 
 
 class TestCalibrationEvaluation(unittest.TestCase):
@@ -32,12 +36,19 @@ class TestCalibrationEvaluation(unittest.TestCase):
 
     def test_evaluation_bundle_writes_report_and_thresholds(self) -> None:
         feature_sets = build_scenario_feature_sets()
-        normal_records = []
+        auth_path = self.output_dir / "evaluation_normal_auth.log"
+        auth_path.unlink(missing_ok=True)
+        SyntheticSshLogGenerator(seed=55, behavior_profile="mixed").build_auth_log(
+            output_path=auth_path,
+            target_feature_rows=600,
+            start_time=datetime(2026, 1, 1, 0, 0, 0),
+        )
+        normal_records = build_feature_records(
+            parse_auth_log_file(auth_path, reference_time=datetime(2026, 2, 1, 0, 0, 0))
+        )
         attack_records = []
         for definition, records in feature_sets:
-            if definition.name == "normal_typo":
-                normal_records.extend(records * 12)
-            else:
+            if definition.name not in {"normal_user", "normal_typo"}:
                 attack_records.extend(records)
 
         summary, artifacts = generate_evaluation_bundle(
@@ -52,6 +63,8 @@ class TestCalibrationEvaluation(unittest.TestCase):
         self.assertTrue(artifacts.report_path.exists())
         self.assertTrue(artifacts.thresholds_path.exists())
         self.assertTrue(artifacts.summary_path.exists())
+        self.assertIsNotNone(artifacts.anomaly_model_path)
+        self.assertTrue(artifacts.anomaly_model_path.exists())
         self.assertGreaterEqual(len(artifacts.trace_paths), 4)
         self.assertGreater(len(summary.scenarios), 0)
 
@@ -59,6 +72,8 @@ class TestCalibrationEvaluation(unittest.TestCase):
             threshold_payload = json.load(handle)
         self.assertIn("thresholds", threshold_payload)
         self.assertIn("failed_count_low", threshold_payload["thresholds"])
+        self.assertIsNotNone(summary.anomaly_training)
+        self.assertEqual(summary.anomaly_training.selection_strategy, "likely_normal_subset")
         self.assertFalse(any("Slow brute force never reached medium risk." == issue for issue in summary.weaknesses))
 
         scenario_by_name = {scenario.definition.name: scenario for scenario in summary.scenarios}

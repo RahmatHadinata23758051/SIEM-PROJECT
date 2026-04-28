@@ -91,9 +91,48 @@
 - Source code awal sudah di-commit dan di-push ke branch `main`.
 - Artefak besar di `data/generated/` dan cache Python tidak dimasukkan ke git melalui `.gitignore`.
 
+## Perubahan Terbaru (Update Terakhir)
+- **Modul Anomaly Detection dengan Isolation Forest**: File baru `hybrid_siem/anomaly.py` ditambahkan dengan implementasi lengkap:
+  - `IsolationForestConfig`: Dataclass untuk konfigurasi model dengan parameter default:
+    - Feature default: `failed_count`, `username_variance`, `inter_arrival_avg`, `failed_ratio`
+    - Scaler: Standard scaler, contamination: 0.03, n_estimators: 200
+    - Smoothing score dengan exponential moving average (EMA) dengan alpha: 0.35
+  - `fit_isolation_forest()`: Function untuk training model dari feature record dengan strategi seleksi data
+  - `AnomalyTrainingReport`: Dataclass untuk menyimpan metadata training
+  - Support untuk normalisasi feature menggunakan quantile-based scaling (0.75-0.995)
+  - Smoothing anomaly score dengan moving average untuk mereduksi noise
+
+- **Integrasi Anomaly Score di Pipeline Decision**:
+  - `PipelineDecision` di `hybrid_siem/pipeline.py` sekarang memiliki field `raw_anomaly_score` dan `anomaly_score`
+  - Risk scoring sekarang menggabungkan rule-based score + anomaly score dengan weights yang dapat dikonfigurasi
+  - `RiskWeights` di `hybrid_siem/risk.py` ditambahkan untuk mengontrol bobot rule vs anomaly
+
+- **Update Modul Evaluasi dan Scenario**:
+  - `hybrid_siem/evaluation.py` sekarang mengintegrasikan anomaly training dan scoring:
+    - `EvaluationArtifacts` memiliki `anomaly_model_path` untuk menyimpan model pickle
+    - `EvaluationSummary` memiliki `anomaly_training` report dan anomaly score di output trace
+  - Plot scenario sekarang menampilkan 3 subplot: risk score, anomaly score, dan perbandingan rule vs AI score
+  - Trace CSV sekarang menyertakan kolom `raw_anomaly_score` dan `anomaly_score` untuk analisis detail
+
+- **New Test Module**: `tests/test_anomaly_integration.py` ditambahkan untuk unit testing anomaly detection
+
+- **Update CLI dan Utilities**:
+  - `hybrid_siem/__init__.py` di-update untuk export anomaly-related classes
+  - `hybrid_siem/evaluate_cli.py` di-update untuk mendukung anomaly model training
+  - `hybrid_siem/scenarios.py` ditambahkan scenario definition untuk testing anomaly
+  - Test module `tests/test_calibration_evaluation.py` di-update untuk test anomaly integration
+
+**Ringkasan Status Implementasi Saat Ini:**
+- Phase 1 rule-based detection + watchlist sudah stabil
+- Phase 2 unsupervised anomaly detection (Isolation Forest) sudah diintegrasikan end-to-end
+- Evaluasi pipeline kini mendukung kombinasi rule-based + anomaly score dengan risk aggregation
+- Model dapat disimpan dan di-load kembali dari disk
+- Trace dan plot scenario sekarang menampilkan kontribusi AI (anomaly) vs rule-based detection
+
 ## Berikutnya
 - Validasi parser dengan log Ubuntu asli yang lebih bervariasi.
-- Tambahkan placeholder integrasi anomaly score dari Isolation Forest.
 - Kalibrasi ulang threshold rule menggunakan log Ubuntu nyata begitu corpus nyata sudah tersedia.
+- Fine-tune parameter Isolation Forest (contamination, n_estimators, smoothing_alpha) berdasarkan performa di real data.
 - Pertimbangkan sidecar metadata synthetic bila nanti ingin evaluasi supervised yang lebih eksplisit.
 - Tinjau ulang feature yang sangat redundant sebelum training model unsupervised agar sinyal AI tidak bias ke dimensi yang sama.
+- Evaluasi feature importance dari anomaly model untuk memahami kontribusi setiap feature terhadap detection.

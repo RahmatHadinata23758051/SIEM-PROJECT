@@ -21,6 +21,17 @@ class ScenarioDefinition:
 def _scenario_lines() -> list[ScenarioDefinition]:
     return [
         ScenarioDefinition(
+            name="normal_user",
+            description="Normal user with successful logins spread across separate windows.",
+            expected_action_ceiling="normal",
+            expected_final_action="normal",
+            log_lines=(
+                "Apr 28 08:15:04 ubuntu sshd[5001]: Accepted publickey for analyst from 10.24.10.9 port 49001 ssh2",
+                "Apr 28 08:17:18 ubuntu sshd[5002]: Accepted publickey for analyst from 10.24.10.9 port 49002 ssh2",
+                "Apr 28 08:24:11 ubuntu sshd[5003]: Accepted password for analyst from 10.24.10.9 port 49003 ssh2",
+            ),
+        ),
+        ScenarioDefinition(
             name="normal_typo",
             description="Normal user with a single typo followed by a successful login.",
             expected_action_ceiling="monitor",

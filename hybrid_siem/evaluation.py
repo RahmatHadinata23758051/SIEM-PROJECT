@@ -5,6 +5,11 @@ import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from hybrid_siem.anomaly import (
+    AnomalyTrainingReport,
+    IsolationForestConfig,
+    fit_isolation_forest,
+)
 from hybrid_siem.calibration import (
     CorrelationReport,
     DatasetFeatureAnalysis,
@@ -15,6 +20,7 @@ from hybrid_siem.calibration import (
 )
 from hybrid_siem.models import FeatureRecord
 from hybrid_siem.pipeline import PipelineDecision, process_feature_records
+from hybrid_siem.risk import RiskWeights
 from hybrid_siem.scenarios import ScenarioDefinition, build_scenario_feature_sets
 from hybrid_siem.validation import load_feature_records_from_csv
 
@@ -31,6 +37,7 @@ class EvaluationArtifacts:
     report_path: Path
     thresholds_path: Path
     summary_path: Path
+    anomaly_model_path: Path | None
     trace_paths: tuple[Path, ...]
     plot_paths: tuple[Path, ...]
 
@@ -41,6 +48,7 @@ class EvaluationSummary:
     attack_analysis: DatasetFeatureAnalysis | None
     calibration: ThresholdCalibrationReport
     correlation: CorrelationReport
+    anomaly_training: AnomalyTrainingReport | None
     scenarios: tuple[ScenarioEvaluation, ...]
     weaknesses: tuple[str, ...]
 
@@ -57,6 +65,21 @@ class EvaluationSummary:
         ]
         for key, value in asdict(self.calibration.thresholds).items():
             lines.append(f"- {key}: {value}")
+
+        if self.anomaly_training is not None:
+            lines.extend(
+                [
+                    "",
+                    "Isolation Forest:",
+                    f"- trained_rows: {self.anomaly_training.trained_row_count}/{self.anomaly_training.baseline_row_count}",
+                    f"- selection_strategy: {self.anomaly_training.selection_strategy}",
+                    f"- features: {', '.join(self.anomaly_training.feature_names)}",
+                    f"- scaler: {self.anomaly_training.scaler}",
+                    f"- contamination: {self.anomaly_training.contamination}",
+                    f"- n_estimators: {self.anomaly_training.n_estimators}",
+                    f"- smoothing_alpha: {self.anomaly_training.smoothing_alpha}",
+                ]
+            )
 
         lines.append("")
         lines.append("Feature Distribution Summary:")
@@ -89,7 +112,9 @@ class EvaluationSummary:
                 lines.append(
                     f"- {decision.feature_record.timestamp.isoformat(sep=' ')} "
                     f"ip={decision.feature_record.ip} event_count={decision.feature_record.event_count} "
-                    f"rule={decision.rule_score} risk={decision.risk_score:.2f} action={decision.action}"
+                    f"rule={decision.rule_score} "
+                    f"anomaly={decision.anomaly_score if decision.anomaly_score is not None else 'n/a'} "
+                    f"risk={decision.risk_score:.2f} action={decision.action}"
                 )
 
         lines.append("")
@@ -163,18 +188,33 @@ def _plot_scenario_traces(
     for scenario in scenarios:
         timestamps = [decision.feature_record.timestamp for decision in scenario.decisions]
         risk_scores = [decision.risk_score for decision in scenario.decisions]
-        event_counts = [decision.feature_record.event_count for decision in scenario.decisions]
+        anomaly_scores = [decision.anomaly_score or 0.0 for decision in scenario.decisions]
+        rule_scores = [decision.rule_score for decision in scenario.decisions]
 
-        figure, axes = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+        figure, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
         axes[0].plot(timestamps, risk_scores, marker="o", color="darkred")
         axes[0].set_ylabel("risk_score")
         axes[0].set_title(f"{scenario.definition.name} risk over time")
         axes[0].grid(True, alpha=0.25)
 
-        axes[1].plot(timestamps, event_counts, marker="s", color="steelblue")
-        axes[1].set_ylabel("event_count")
-        axes[1].set_xlabel("timestamp")
+        axes[1].plot(timestamps, anomaly_scores, marker="^", color="darkorange")
+        axes[1].set_ylabel("anomaly")
+        axes[1].set_ylim(0.0, 1.05)
+        axes[1].set_title("smoothed anomaly score")
         axes[1].grid(True, alpha=0.25)
+
+        axes[2].plot(timestamps, rule_scores, marker="s", color="steelblue", label="rule_score")
+        axes[2].plot(
+            timestamps,
+            [score * 100.0 for score in anomaly_scores],
+            marker="d",
+            color="darkorange",
+            label="anomaly_score_x100",
+        )
+        axes[2].set_ylabel("rule vs AI")
+        axes[2].set_xlabel("timestamp")
+        axes[2].legend()
+        axes[2].grid(True, alpha=0.25)
         figure.tight_layout()
 
         path = output_dir / f"{scenario.definition.name}_trace.png"
@@ -213,7 +253,22 @@ def _write_trace_csv(scenario: ScenarioEvaluation, output_dir: Path) -> Path:
     path = output_dir / f"{scenario.definition.name}_trace.csv"
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(["timestamp", "ip", "failed_count", "request_rate", "username_variance", "failed_ratio", "event_count", "rule_score", "risk_score", "action"])
+        writer.writerow(
+            [
+                "timestamp",
+                "ip",
+                "failed_count",
+                "request_rate",
+                "username_variance",
+                "failed_ratio",
+                "event_count",
+                "rule_score",
+                "raw_anomaly_score",
+                "anomaly_score",
+                "risk_score",
+                "action",
+            ]
+        )
         for decision in scenario.decisions:
             record = decision.feature_record
             writer.writerow(
@@ -226,6 +281,8 @@ def _write_trace_csv(scenario: ScenarioEvaluation, output_dir: Path) -> Path:
                     record.failed_ratio,
                     record.event_count,
                     decision.rule_score,
+                    decision.raw_anomaly_score,
+                    decision.anomaly_score,
                     decision.risk_score,
                     decision.action,
                 ]
@@ -259,6 +316,7 @@ def _scenario_metrics(scenario: ScenarioEvaluation) -> dict[str, object]:
         return {
             "name": scenario.definition.name,
             "peak_risk": 0.0,
+            "peak_anomaly": 0.0,
             "final_risk": 0.0,
             "peak_action": "normal",
             "final_action": "normal",
@@ -273,6 +331,7 @@ def _scenario_metrics(scenario: ScenarioEvaluation) -> dict[str, object]:
     return {
         "name": scenario.definition.name,
         "peak_risk": peak_risk,
+        "peak_anomaly": max((decision.anomaly_score or 0.0) for decision in scenario.decisions),
         "final_risk": scenario.decisions[-1].risk_score,
         "peak_action": peak_action,
         "final_action": final_action,
@@ -327,6 +386,12 @@ def _identify_weaknesses(summary: EvaluationSummary) -> tuple[str, ...]:
         peak_risk = max(decision.risk_score for decision in normal_typo.decisions)
         if peak_risk >= 60:
             weaknesses.append("Normal typo scenario escalated into medium-or-higher risk.")
+        if max((decision.anomaly_score or 0.0) for decision in normal_typo.decisions) >= 0.35:
+            weaknesses.append("Normal typo scenario produced an overly high anomaly score.")
+
+    normal_user = next((scenario for scenario in summary.scenarios if scenario.definition.name == "normal_user"), None)
+    if normal_user and max((decision.anomaly_score or 0.0) for decision in normal_user.decisions) >= 0.15:
+        weaknesses.append("Normal user scenario anomaly score did not stay low.")
 
     slow_attack = next((scenario for scenario in summary.scenarios if scenario.definition.name == "slow_bruteforce"), None)
     if slow_attack:
@@ -343,6 +408,8 @@ def _identify_weaknesses(summary: EvaluationSummary) -> tuple[str, ...]:
             weaknesses.append("Slow brute force risk did not climb gradually before the peak.")
         if peak_index < len(risk_series) - 1 and risk_series[-1] >= peak_risk:
             weaknesses.append("Slow brute force did not decay after the quiet period.")
+        if max((decision.anomaly_score or 0.0) for decision in primary_track) < 0.05:
+            weaknesses.append("Slow brute force anomaly score never rose meaningfully.")
 
     aggressive = next((scenario for scenario in summary.scenarios if scenario.definition.name == "aggressive_bruteforce"), None)
     if aggressive:
@@ -355,6 +422,8 @@ def _identify_weaknesses(summary: EvaluationSummary) -> tuple[str, ...]:
             weaknesses.append("Aggressive brute force did not spike into high risk.")
         if peak_index == len(risk_series) - 1 or risk_series[-1] >= peak_risk:
             weaknesses.append("Aggressive brute force did not show decay after quiet period.")
+        if max((decision.anomaly_score or 0.0) for decision in primary_track) < 0.50:
+            weaknesses.append("Aggressive brute force anomaly score remained too low.")
 
     distributed = next((scenario for scenario in summary.scenarios if scenario.definition.name == "distributed_attack"), None)
     if distributed:
@@ -369,16 +438,33 @@ def _identify_weaknesses(summary: EvaluationSummary) -> tuple[str, ...]:
             for track in grouped.values()
         ):
             weaknesses.append("Distributed attack risk was not gradually increasing per IP.")
+        if max((decision.anomaly_score or 0.0) for decision in distributed.decisions) < 0.05:
+            weaknesses.append("Distributed attack anomaly score remained near zero.")
 
     return tuple(dict.fromkeys(weaknesses))
 
 
 def evaluate_scenarios(
     thresholds_report: ThresholdCalibrationReport,
+    anomaly_detector=None,
+    anomaly_config: IsolationForestConfig | None = None,
+    anomaly_training_records: list[FeatureRecord] | None = None,
+    risk_weights: RiskWeights | None = None,
 ) -> tuple[ScenarioEvaluation, ...]:
+    if anomaly_detector is None and anomaly_training_records:
+        anomaly_detector = fit_isolation_forest(
+            anomaly_training_records,
+            config=anomaly_config,
+            source_label="scenario_normal_like",
+        )
     scenario_evaluations: list[ScenarioEvaluation] = []
     for definition, records in build_scenario_feature_sets():
-        decisions = process_feature_records(records, thresholds=thresholds_report.thresholds)
+        decisions = process_feature_records(
+            records,
+            thresholds=thresholds_report.thresholds,
+            weights=risk_weights,
+            anomaly_detector=anomaly_detector,
+        )
         scenario_evaluations.append(ScenarioEvaluation(definition=definition, decisions=tuple(decisions)))
     return tuple(scenario_evaluations)
 
@@ -390,6 +476,8 @@ def generate_evaluation_bundle(
     normal_label: str = "normal_like",
     attack_label: str = "attack_like",
     histogram_bins: int = 10,
+    anomaly_config: IsolationForestConfig | None = None,
+    risk_weights: RiskWeights | None = None,
 ) -> tuple[EvaluationSummary, EvaluationArtifacts]:
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -401,20 +489,33 @@ def generate_evaluation_bundle(
         else None
     )
     calibration = calibrate_rule_thresholds_from_normal(normal_records, source_label=normal_label)
+    anomaly_detector = fit_isolation_forest(normal_records, config=anomaly_config, source_label=normal_label)
 
     combined_records = list(normal_records) + list(attack_records or [])
-    combined_decisions = process_feature_records(combined_records, thresholds=calibration.thresholds)
+    combined_decisions = process_feature_records(
+        combined_records,
+        thresholds=calibration.thresholds,
+        weights=risk_weights,
+        anomaly_detector=anomaly_detector,
+    )
     correlation = compute_feature_correlations(
         combined_records,
         risk_scores=[decision.risk_score for decision in combined_decisions],
     )
-    scenarios = evaluate_scenarios(calibration)
+    scenarios = evaluate_scenarios(
+        calibration,
+        anomaly_detector=anomaly_detector,
+        anomaly_config=anomaly_detector.config,
+        anomaly_training_records=normal_records,
+        risk_weights=risk_weights,
+    )
 
     summary = EvaluationSummary(
         normal_analysis=normal_analysis,
         attack_analysis=attack_analysis,
         calibration=calibration,
         correlation=correlation,
+        anomaly_training=anomaly_detector.training_report,
         scenarios=scenarios,
         weaknesses=tuple(),
     )
@@ -423,6 +524,7 @@ def generate_evaluation_bundle(
         attack_analysis=summary.attack_analysis,
         calibration=summary.calibration,
         correlation=summary.correlation,
+        anomaly_training=summary.anomaly_training,
         scenarios=summary.scenarios,
         weaknesses=_identify_weaknesses(summary),
     )
@@ -441,6 +543,7 @@ def generate_evaluation_bundle(
                 "attack_analysis": asdict(attack_analysis) if attack_analysis else None,
                 "calibration": calibration.as_dict(),
                 "correlation": asdict(correlation),
+                "anomaly_training": summary.anomaly_training.as_dict() if summary.anomaly_training else None,
                 "scenarios": [_scenario_metrics(scenario) for scenario in scenarios],
                 "weaknesses": list(summary.weaknesses),
             },
@@ -449,6 +552,7 @@ def generate_evaluation_bundle(
         encoding="utf-8",
     )
 
+    anomaly_model_path = anomaly_detector.save(out_dir / "isolation_forest_model.pkl")
     trace_paths = tuple(_write_trace_csv(scenario, out_dir) for scenario in scenarios)
     plot_paths_list = _plot_feature_histograms(normal_analysis, attack_analysis, out_dir) + _plot_scenario_traces(
         scenarios, out_dir
@@ -463,6 +567,7 @@ def generate_evaluation_bundle(
         report_path=report_path,
         thresholds_path=thresholds_path,
         summary_path=summary_path,
+        anomaly_model_path=anomaly_model_path,
         trace_paths=trace_paths,
         plot_paths=plot_paths,
     )
@@ -476,6 +581,8 @@ def generate_evaluation_bundle_from_csv(
     normal_label: str = "normal_like",
     attack_label: str = "attack_like",
     histogram_bins: int = 10,
+    anomaly_config: IsolationForestConfig | None = None,
+    risk_weights: RiskWeights | None = None,
 ) -> tuple[EvaluationSummary, EvaluationArtifacts]:
     normal_records = load_feature_records_from_csv(normal_dataset_path)
     attack_records = load_feature_records_from_csv(attack_dataset_path) if attack_dataset_path else None
@@ -486,4 +593,6 @@ def generate_evaluation_bundle_from_csv(
         normal_label=normal_label,
         attack_label=attack_label,
         histogram_bins=histogram_bins,
+        anomaly_config=anomaly_config,
+        risk_weights=risk_weights,
     )
