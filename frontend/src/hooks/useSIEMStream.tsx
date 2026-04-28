@@ -6,14 +6,15 @@
  */
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import {
-  generateSIEMEvent,
   generateEventBatch,
-  getSystemMetrics,
+  fetchSystemMetricsAsync,
   getTelemetryHistory,
   type SIEMEvent,
   type SystemMetrics,
   type TelemetryPoint,
 } from '../lib/api';
+
+export type ConnectionStatus = 'CONNECTING' | 'CONNECTED' | 'DISCONNECTED' | 'ERROR';
 
 export interface SIEMStreamState {
   events: SIEMEvent[];
@@ -27,6 +28,7 @@ export interface SIEMStreamState {
   setSelectedIp: (ip: string | null) => void;
   setStreaming: (v: boolean) => void;
   refresh: () => void;
+  connectionStatus: ConnectionStatus;
 }
 
 const SIEMContext = createContext<SIEMStreamState | null>(null);
@@ -47,55 +49,112 @@ export function SIEMProvider({
   autoStart = true,
 }: SIEMProviderProps) {
   const [events, setEvents] = useState<SIEMEvent[]>(() => generateEventBatch(initialBatch));
-  const [metrics, setMetrics] = useState<SystemMetrics>(() => getSystemMetrics());
+  // Initial empty metrics will be updated by refresh()
+  const [metrics, setMetrics] = useState<SystemMetrics>({
+    status: 'NOMINAL', events_24h: '0', events_trend: 0, active_suspicious_ips: 0,
+    critical_nodes_isolated: 0, high_risk_count: 0, elevated_anomaly_count: 0, baseline_count: 0
+  });
   const [telemetry, setTelemetry] = useState<TelemetryPoint[]>(() => getTelemetryHistory(12));
   const [isStreaming, setIsStreaming] = useState(autoStart);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedIp, setSelectedIp] = useState<string | null>(null);
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('CONNECTING');
 
-  const tickRef = useRef(0);
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimeoutRef = useRef<number | null>(null);
+  const reconnectAttemptsRef = useRef(0);
 
-  const refresh = useCallback(() => {
-    setEvents(generateEventBatch(initialBatch));
-    setMetrics(getSystemMetrics());
-    setTelemetry(getTelemetryHistory(12));
+  const refresh = useCallback(async () => {
+    try {
+      const newMetrics = await fetchSystemMetricsAsync();
+      setMetrics(newMetrics);
+    } catch (e) {
+      console.error(e);
+    }
     setLastUpdated(new Date());
-  }, [initialBatch]);
+  }, []);
+
+  // Fetch initial metrics
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
 
   useEffect(() => {
-    if (!isStreaming) return;
-
-    const id = setInterval(() => {
-      tickRef.current += 1;
-
-      // New event every tick
-      const newEvent = generateSIEMEvent();
-      setEvents(prev => [newEvent, ...prev].slice(0, maxEvents));
-
-      // Refresh metrics every 5 ticks (~10 s)
-      if (tickRef.current % 5 === 0) {
-        setMetrics(getSystemMetrics());
+    if (!isStreaming) {
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
       }
+      setConnectionStatus('DISCONNECTED');
+      return;
+    }
 
-      // Append a new telemetry point every 15 ticks (~30 s)
-      if (tickRef.current % 15 === 0) {
-        const now = new Date();
-        const label = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-        setTelemetry(prev => [
-          ...prev.slice(-11),
-          { time: label, volume: Math.floor(Math.random() * 4500 + 1500), risk: Math.floor(Math.random() * 9000 + 800) },
-        ]);
-      }
+    const connectWs = () => {
+      setConnectionStatus('CONNECTING');
+      const ws = new WebSocket('ws://localhost:8000/api/events');
+      
+      ws.onopen = () => {
+        setConnectionStatus('CONNECTED');
+        reconnectAttemptsRef.current = 0;
+      };
 
-      setLastUpdated(new Date());
-    }, intervalMs);
+      ws.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          if (payload.type === 'initial_batch') {
+            setEvents(payload.data.slice(0, maxEvents));
+          } else if (payload.type === 'events_batch') {
+            setEvents(prev => {
+              const newEvents = payload.data.reverse();
+              return [...newEvents, ...prev].slice(0, maxEvents);
+            });
+            refresh(); // refresh metrics on new events
+            
+            // Append telemetry roughly
+            const now = new Date();
+            const label = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+            setTelemetry(prev => {
+              if (prev.length > 0 && prev[prev.length-1].time === label) return prev;
+              return [
+                ...prev.slice(-11),
+                { time: label, volume: Math.floor(Math.random() * 4500 + 1500), risk: Math.floor(Math.random() * 9000 + 800) },
+              ];
+            });
+          }
+          setLastUpdated(new Date());
+        } catch (e) {
+          console.error("Failed to parse WS message", e);
+        }
+      };
 
-    return () => clearInterval(id);
-  }, [isStreaming, intervalMs, maxEvents]);
+      ws.onclose = () => {
+        setConnectionStatus('ERROR');
+        wsRef.current = null;
+        
+        // Exponential backoff reconnect
+        const backoff = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 30000);
+        reconnectAttemptsRef.current += 1;
+        reconnectTimeoutRef.current = window.setTimeout(connectWs, backoff);
+      };
+
+      ws.onerror = () => {
+        setConnectionStatus('ERROR');
+      };
+
+      wsRef.current = ws;
+    };
+
+    connectWs();
+
+    return () => {
+      if (wsRef.current) wsRef.current.close();
+      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+    };
+  }, [isStreaming, maxEvents, refresh]);
 
   return (
-    <SIEMContext.Provider value={{ events, metrics, telemetry, isStreaming, lastUpdated, searchQuery, setSearchQuery, selectedIp, setSelectedIp, setStreaming: setIsStreaming, refresh }}>
+    <SIEMContext.Provider value={{ events, metrics, telemetry, isStreaming, lastUpdated, searchQuery, setSearchQuery, selectedIp, setSelectedIp, setStreaming: setIsStreaming, refresh, connectionStatus }}>
       {children}
     </SIEMContext.Provider>
   );

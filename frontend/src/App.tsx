@@ -23,16 +23,18 @@ import ThreatHunting from './components/ThreatHunting';
 import NetworkMap from './components/NetworkMap';
 import AIInsights from './components/AIInsights';
 import Reports from './components/Reports';
+import Login from './components/Login';
 import { useSIEMStream } from './hooks/useSIEMStream';
-import { ShieldAlert, X, ShieldCheck, Globe, MapPin } from 'lucide-react';
+import { ShieldAlert, X, ShieldCheck, Globe, MapPin, LogOut } from 'lucide-react';
 
 type View = 'dashboard' | 'threat-hunting' | 'log-explorer' | 'ai-insights' | 'network-map' | 'reports';
 
 export default function App() {
+  const [token, setToken] = useState<string | null>(localStorage.getItem('siem_token'));
   const [activeView, setActiveView] = useState<View>('dashboard');
   const [dismissedToasts, setDismissedToasts] = useState<Set<string>>(new Set());
 
-  const { events, searchQuery, setSearchQuery, selectedIp, setSelectedIp } = useSIEMStream();
+  const { events, searchQuery, setSearchQuery, selectedIp, setSelectedIp, connectionStatus } = useSIEMStream();
   
   // Badge: Count CRIT events
   const critEvents = events.filter(e => e.risk_level === 'high' || e.risk_level === 'medium');
@@ -40,6 +42,20 @@ export default function App() {
   // Toast: Show latest blocked event (risk >= 85) if not dismissed
   const latestBlock = events.find(e => e.risk_score >= 85);
   const showToast = latestBlock && !dismissedToasts.has(latestBlock.id);
+
+  const handleLogin = (newToken: string) => {
+    localStorage.setItem('siem_token', newToken);
+    setToken(newToken);
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('siem_token');
+    setToken(null);
+  };
+
+  if (!token) {
+    return <Login onLogin={handleLogin} />;
+  }
 
   return (
     <div className="flex h-screen bg-background text-on-surface overflow-hidden relative">
@@ -191,6 +207,7 @@ export default function App() {
         <div className="mt-auto flex flex-col gap-1 border-t border-outline-variant/20 pt-4">
           <NavItem icon={<HelpCircle size={18} />} label="Support" onClick={() => {}} />
           <NavItem icon={<BookOpen size={18} />} label="Documentation" onClick={() => {}} />
+          <NavItem icon={<LogOut size={18} />} label="Logout" onClick={handleLogout} />
         </div>
       </aside>
 
@@ -199,7 +216,19 @@ export default function App() {
         {/* Navbar */}
         <header className="h-16 bg-[#0B0F14]/80 backdrop-blur-lg border-b border-outline-variant/30 flex justify-between items-center px-6 sticky top-0 z-50">
           <div className="flex items-center gap-4 flex-1">
-            <h2 className="text-lg font-bold tracking-tight text-slate-100 mr-8">Aegis AI SIEM</h2>
+            <h2 className="text-lg font-bold tracking-tight text-slate-100 mr-4">Aegis AI SIEM</h2>
+            <div className={cn(
+              "px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-widest border flex items-center gap-1.5 mr-4",
+              connectionStatus === 'CONNECTED' ? "bg-emerald-500/10 text-emerald-500 border-emerald-500/20" :
+              connectionStatus === 'CONNECTING' ? "bg-tertiary/10 text-tertiary border-tertiary/20" :
+              "bg-error/10 text-error border-error/20 animate-pulse"
+            )}>
+              <span className={cn("w-1.5 h-1.5 rounded-full", 
+                connectionStatus === 'CONNECTED' ? "bg-emerald-500" :
+                connectionStatus === 'CONNECTING' ? "bg-tertiary animate-ping" : "bg-error"
+              )} />
+              {connectionStatus}
+            </div>
             <div className="relative group max-w-md w-full">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-on-surface-variant w-4.5 h-4.5 group-focus-within:text-primary transition-colors" />
               <input 

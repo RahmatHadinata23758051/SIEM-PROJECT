@@ -262,6 +262,36 @@ export function getHuntingResults(count = 10): HuntingResult[] {
   }).sort((a, b) => b.risk_score - a.risk_score);
 }
 
+// ─── Async Fetchers (Sprint 5) ────────────────────────────────────────────────
+
+const API_BASE = 'http://localhost:8000/api';
+
+async function fetchWithFallback<T>(url: string, fallbackFn: () => T): Promise<T> {
+  try {
+    const token = localStorage.getItem('siem_token');
+    const res = await fetch(`${API_BASE}${url}`, {
+      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) }
+    });
+    if (!res.ok) throw new Error('API Error');
+    return await res.json();
+  } catch (err) {
+    console.warn(`[Fallback] Failed to fetch ${url}, using mock data.`, err);
+    return fallbackFn();
+  }
+}
+
+export async function fetchSystemMetricsAsync(): Promise<SystemMetrics> {
+  return fetchWithFallback('/metrics', getSystemMetrics);
+}
+
+export async function fetchNetworkNodesAsync(): Promise<NetworkNode[]> {
+  return fetchWithFallback('/network-nodes', () => getNetworkNodes(16));
+}
+
+export async function fetchHuntingResultsAsync(): Promise<HuntingResult[]> {
+  return fetchWithFallback('/hunting-results', () => getHuntingResults(15));
+}
+
 /** Build a live log entry string (for LogExplorer / Dashboard stream). */
 export function formatLogLine(event: SIEMEvent): {
   time: string;
