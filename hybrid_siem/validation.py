@@ -163,7 +163,7 @@ def validate_feature_records(
     )
 
 
-def load_feature_records_from_csv(dataset_path: str | Path) -> list[FeatureRecord]:
+def load_feature_records_from_csv(dataset_path: str | Path, window_seconds: int = 60) -> list[FeatureRecord]:
     path = Path(dataset_path)
     records: list[FeatureRecord] = []
     with path.open("r", encoding="utf-8", newline="") as handle:
@@ -171,6 +171,9 @@ def load_feature_records_from_csv(dataset_path: str | Path) -> list[FeatureRecor
         for row in reader:
             inter_arrival_raw = row.get("inter_arrival_avg")
             inter_arrival_avg = float(inter_arrival_raw) if inter_arrival_raw not in {None, ""} else None
+            inferred_total_attempts = max(1, int(round(float(row["request_rate"]) * window_seconds)))
+            event_count_raw = row.get("event_count")
+            event_count = int(event_count_raw) if event_count_raw not in {None, ""} else inferred_total_attempts
             records.append(
                 FeatureRecord(
                     timestamp=datetime.fromisoformat(row["timestamp"]),
@@ -180,8 +183,8 @@ def load_feature_records_from_csv(dataset_path: str | Path) -> list[FeatureRecor
                     username_variance=int(row["username_variance"]),
                     inter_arrival_avg=inter_arrival_avg,
                     failed_ratio=float(row["failed_ratio"]),
-                    event_count=int(row["event_count"]),
-                    total_attempts=0,
+                    event_count=event_count,
+                    total_attempts=inferred_total_attempts,
                 )
             )
     return records
