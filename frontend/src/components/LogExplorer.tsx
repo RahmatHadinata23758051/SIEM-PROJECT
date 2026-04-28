@@ -1,100 +1,104 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { 
-  Terminal, 
-  Search, 
-  ChevronDown, 
-  Download, 
-  Pause, 
-  Play, 
-  Filter, 
-  Clock, 
-  ShieldAlert,
-  ChevronUp,
-  ExternalLink,
-  ShieldCheck,
-  ShieldX
+  Terminal, Search, ChevronDown, Download, Pause, Play,
+  Filter, Clock, ShieldAlert, ChevronUp, ShieldCheck,
 } from 'lucide-react';
-import { cn } from '@/src/lib/utils';
+import { cn } from '../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
+import { useSIEMStream } from '../hooks/useSIEMStream';
+import { type SIEMEvent } from '../lib/api';
 
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+type Severity = 'ALL' | 'INFO' | 'WARN' | 'CRIT';
+
+// Map SIEMEvent → display-friendly Log shape
 interface Log {
   id: string;
   timestamp: string;
-  severity: 'INFO' | 'WARN' | 'CRITICAL';
+  severity: 'INFO' | 'WARN' | 'CRIT';
   sourceIp: string;
-  destIp: string;
   message: string;
-  details?: {
+  details: {
     riskScore: number;
     requestRate: string;
     variance: string;
-    mitreTactic: string;
+    reasons: string[];
     payload: string;
   };
 }
 
-const logs: Log[] = [
-  {
-    id: '1',
-    timestamp: '2023-10-27 14:32:01',
-    severity: 'INFO',
-    sourceIp: '192.168.1.45',
-    destIp: '10.0.0.5',
-    message: "User 'jdoe' successfully authenticated via SSO."
-  },
-  {
-    id: '2',
-    timestamp: '2023-10-27 14:32:04',
-    severity: 'WARN',
-    sourceIp: '172.16.0.102',
-    destIp: '8.8.8.8',
-    message: "High latency detected on primary outbound interface (eth0)."
-  },
-  {
-    id: '3',
-    timestamp: '2023-10-27 14:32:05',
-    severity: 'CRITICAL',
-    sourceIp: '185.15.22.90',
-    destIp: '10.0.0.15',
-    message: "Failed SSH login attempt for user 'root'. Signature match: Brute Force.",
+function toLog(event: SIEMEvent): Log {
+  const severityMap: Record<string, 'INFO' | 'WARN' | 'CRIT'> = {
+    normal: 'INFO',
+    low:    'INFO',
+    medium: 'WARN',
+    high:   'CRIT',
+  };
+  return {
+    id:        event.id,
+    timestamp: new Date(event.timestamp).toLocaleString('id-ID', { hour12: false }),
+    severity:  severityMap[event.risk_level],
+    sourceIp:  event.ip,
+    message:   `[SSH] ${event.action.toUpperCase()} — risk=${event.risk_score.toFixed(0)} rule=${event.rule_score} anomaly=${event.anomaly_score.toFixed(2)} | ${event.reasons[0] ?? 'No anomalies'}`,
     details: {
-      riskScore: 98.5,
-      requestRate: "45/sec",
-      variance: "HIGH (New IP)",
-      mitreTactic: "Credential Access",
+      riskScore:   event.risk_score,
+      requestRate: `${event.request_rate.toFixed(3)}/s`,
+      variance:    `${event.username_variance} unique users`,
+      reasons:     event.reasons,
       payload: JSON.stringify({
-        "timestamp": "2023-10-27T14:32:05.112Z",
-        "event_type": "ssh_auth",
-        "src_ip": "185.15.22.90",
-        "dest_ip": "10.0.0.15",
-        "user": "root",
-        "auth_method": "password",
-        "result": "failure",
-        "msg": "pam_unix(sshd:auth): authentication failure"
-      }, null, 2)
-    }
-  },
-  {
-    id: '4',
-    timestamp: '2023-10-27 14:32:08',
-    severity: 'INFO',
-    sourceIp: '10.0.0.15',
-    destIp: '192.168.1.1',
-    message: "Firewall rule 'Deny_All_Inbound' evaluated. Action: DROP."
-  },
-  {
-    id: '5',
-    timestamp: '2023-10-27 14:32:10',
-    severity: 'INFO',
-    sourceIp: '192.168.1.50',
-    destIp: '10.0.0.2',
-    message: "API requested resource /v1/metrics/health"
-  }
-];
+        timestamp:    event.timestamp,
+        event_type:   'ssh_auth',
+        src_ip:       event.ip,
+        risk_score:   event.risk_score,
+        rule_score:   event.rule_score,
+        anomaly:      event.anomaly_score,
+        action:       event.action,
+        method:       event.scoring_method,
+        failed_count: event.failed_count,
+        failed_ratio: event.failed_ratio,
+        strike_count: event.strike_count,
+        reasons:      event.reasons,
+      }, null, 2),
+    },
+  };
+}
+
+// ─── Component ────────────────────────────────────────────────────────────────
 
 export default function LogExplorer() {
-  const [isStreaming, setIsStreaming] = useState(true);
-  const [expandedLog, setExpandedLog] = useState<string | null>('3');
+  const { events, isStreaming, setStreaming } = useSIEMStream({
+    intervalMs:   1500,
+    maxEvents:    80,
+    initialBatch: 20,
+  });
+
+  const [expandedLog, setExpandedLog] = useState<string | null>(null);
+  const [query,       setQuery]       = useState('');
+  const [severity,    setSeverity]    = useState<Severity>('ALL');
+
+  const logs: Log[] = useMemo(() => events.map(toLog), [events]);
+
+  const filtered = useMemo(() => logs.filter(log => {
+    const matchSev = severity === 'ALL' || log.severity === severity;
+    const q = query.toLowerCase();
+    const matchQ = !q
+      || log.sourceIp.includes(q)
+      || log.message.toLowerCase().includes(q)
+      || log.severity.toLowerCase().includes(q);
+    return matchSev && matchQ;
+  }), [logs, query, severity]);
+
+  // Export visible logs as JSON
+  const handleExport = () => {
+    const blob = new Blob([JSON.stringify(filtered, null, 2)], { type: 'application/json' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = `siem-logs-${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   return (
     <div className="flex flex-col h-full bg-background">
@@ -104,21 +108,24 @@ export default function LogExplorer() {
           <div className="flex items-center gap-3">
             <h1 className="text-2xl font-bold text-on-surface">Live Log Stream</h1>
             <div className="flex items-center gap-2 px-2 py-1 rounded-full bg-surface-container-high border border-outline-variant/30">
-              <span className={cn("w-2 h-2 rounded-full", isStreaming ? "bg-primary animate-pulse" : "bg-outline-variant")} />
+              <span className={cn('w-2 h-2 rounded-full', isStreaming ? 'bg-primary animate-pulse' : 'bg-outline-variant')} />
               <span className="text-[10px] font-bold uppercase tracking-widest text-on-surface-variant">
-                {isStreaming ? 'Streaming' : 'Paused'}
+                {isStreaming ? `Streaming · ${filtered.length} events` : 'Paused'}
               </span>
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <button 
-              onClick={() => setIsStreaming(!isStreaming)}
+            <button
+              onClick={() => setStreaming(!isStreaming)}
               className="h-9 px-3 flex items-center gap-2 rounded-lg bg-surface-container border border-outline-variant/30 text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-all text-sm font-semibold"
             >
               {isStreaming ? <Pause size={16} /> : <Play size={16} />}
               {isStreaming ? 'Pause Feed' : 'Resume Feed'}
             </button>
-            <button className="h-9 px-3 flex items-center gap-2 rounded-lg bg-surface-container border border-outline-variant/30 text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-all text-sm font-semibold">
+            <button
+              onClick={handleExport}
+              className="h-9 px-3 flex items-center gap-2 rounded-lg bg-surface-container border border-outline-variant/30 text-on-surface-variant hover:text-on-surface hover:bg-surface-container-high transition-all text-sm font-semibold"
+            >
               <Download size={16} />
               Export
             </button>
@@ -127,14 +134,30 @@ export default function LogExplorer() {
 
         {/* Filter Bar */}
         <div className="flex items-center gap-2 bg-surface-container-low/50 p-1.5 rounded-xl border border-outline-variant/20 shadow-inner">
-          <FilterGroup icon={<Clock size={16} />} label="Last 15 Minutes" />
-          <FilterGroup icon={<ShieldAlert size={16} />} label="All Severities" />
+          <FilterGroup icon={<Clock size={16} />} label="Live" />
+          {(['ALL', 'INFO', 'WARN', 'CRIT'] as Severity[]).map(s => (
+            <button
+              key={s}
+              onClick={() => setSeverity(s)}
+              className={cn(
+                'flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all',
+                severity === s
+                  ? 'bg-surface-container-highest text-on-surface'
+                  : 'text-on-surface-variant hover:bg-surface-container-high'
+              )}
+            >
+              <ShieldAlert size={14} />
+              {s}
+            </button>
+          ))}
           <div className="flex-1 flex items-center px-3 gap-3">
             <Terminal size={18} className="text-on-surface-variant" />
-            <input 
-              type="text" 
-              placeholder="Filter by IP, host, or KQL query..." 
-              className="bg-transparent border-none w-full text-sm font-mono text-on-surface focus:ring-0 placeholder-on-surface-variant/50"
+            <input
+              type="text"
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder="Filter by IP, severity, or message..."
+              className="bg-transparent border-none w-full text-sm font-mono text-on-surface focus:ring-0 placeholder-on-surface-variant/50 outline-none"
             />
           </div>
         </div>
@@ -143,52 +166,55 @@ export default function LogExplorer() {
       {/* Log Viewer Core */}
       <div className="flex-1 overflow-hidden flex flex-col p-4">
         {/* Table Header */}
-        <div className="grid grid-cols-[160px_100px_140px_140px_1fr_40px] gap-4 px-6 py-3 bg-surface-container-high border border-outline-variant/30 rounded-t-xl text-[10px] font-bold text-on-surface-variant uppercase tracking-widest">
+        <div className="grid grid-cols-[180px_90px_150px_1fr_40px] gap-4 px-6 py-3 bg-surface-container-high border border-outline-variant/30 rounded-t-xl text-[10px] font-bold text-on-surface-variant uppercase tracking-widest">
           <div>Timestamp</div>
           <div>Severity</div>
           <div>Source IP</div>
-          <div>Dest IP</div>
           <div>Message Payload</div>
           <div className="text-center">Act</div>
         </div>
 
         {/* Scrolling Log Container */}
         <div className="flex-1 overflow-y-auto border-x border-b border-outline-variant/30 rounded-b-xl bg-surface-container-lowest/30">
-          {logs.map((log) => (
+          {filtered.length === 0 && (
+            <div className="flex items-center justify-center h-32 text-on-surface-variant text-sm">
+              No events match your filter.
+            </div>
+          )}
+          {filtered.map((log) => (
             <div key={log.id} className="flex flex-col border-b border-outline-variant/10">
-              <div 
+              <div
                 onClick={() => setExpandedLog(expandedLog === log.id ? null : log.id)}
                 className={cn(
-                  "grid grid-cols-[160px_100px_140px_140px_1fr_40px] gap-4 px-6 py-3 hover:bg-surface-container-low/50 transition-colors cursor-pointer group items-center font-mono text-xs",
-                  log.severity === 'CRITICAL' ? "bg-error/5 text-on-surface" : "text-on-surface-variant",
-                  expandedLog === log.id && log.severity === 'CRITICAL' && "bg-error/10"
+                  'grid grid-cols-[180px_90px_150px_1fr_40px] gap-4 px-6 py-3 hover:bg-surface-container-low/50 transition-colors cursor-pointer items-center font-mono text-xs',
+                  log.severity === 'CRIT' ? 'bg-error/5 text-on-surface' : 'text-on-surface-variant',
+                  expandedLog === log.id && log.severity === 'CRIT' && 'bg-error/10',
                 )}
               >
                 <div className="text-[10px] opacity-60">{log.timestamp}</div>
                 <div>
                   <span className={cn(
-                    "px-2 py-0.5 rounded text-[10px] font-bold border",
-                    log.severity === 'INFO' ? "bg-primary/10 text-primary border-primary/20" :
-                    log.severity === 'WARN' ? "bg-tertiary/10 text-tertiary border-tertiary/20" :
-                    "bg-error/15 text-error border-error/30 animate-pulse"
+                    'px-2 py-0.5 rounded text-[10px] font-bold border',
+                    log.severity === 'INFO' ? 'bg-primary/10 text-primary border-primary/20' :
+                    log.severity === 'WARN' ? 'bg-tertiary/10 text-tertiary border-tertiary/20' :
+                    'bg-error/15 text-error border-error/30 animate-pulse',
                   )}>
                     {log.severity}
                   </span>
                 </div>
-                <div className={cn(log.severity === 'CRITICAL' ? "text-error font-bold" : "text-on-surface-variant")}>
+                <div className={cn(log.severity === 'CRIT' ? 'text-error font-bold' : 'text-on-surface-variant')}>
                   {log.sourceIp}
                 </div>
-                <div>{log.destIp}</div>
                 <div className="truncate font-medium">{log.message}</div>
-                <div className="flex justify-center transition-opacity">
+                <div className="flex justify-center">
                   {expandedLog === log.id ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
                 </div>
               </div>
 
               {/* Expansion Content */}
               <AnimatePresence>
-                {expandedLog === log.id && log.details && (
-                  <motion.div 
+                {expandedLog === log.id && (
+                  <motion.div
                     initial={{ height: 0, opacity: 0 }}
                     animate={{ height: 'auto', opacity: 1 }}
                     exit={{ height: 0, opacity: 0 }}
@@ -201,10 +227,12 @@ export default function LogExplorer() {
                           AI Parsed Features
                         </h4>
                         <div className="font-mono text-xs space-y-2">
-                          <DetailItem label="risk_score" value={log.details.riskScore.toString()} variant="error" />
+                          <DetailItem label="risk_score"   value={log.details.riskScore.toFixed(1)} variant={log.details.riskScore >= 85 ? 'error' : 'tertiary'} />
                           <DetailItem label="request_rate" value={log.details.requestRate} variant="tertiary" />
                           <DetailItem label="user_variance" value={log.details.variance} />
-                          <DetailItem label="mitre_tactic" value={log.details.mitreTactic} />
+                          {log.details.reasons.map((r, i) => (
+                            <DetailItem key={i} label={`reason[${i}]`} value={r} />
+                          ))}
                         </div>
                       </div>
                       <div className="space-y-4">
@@ -236,7 +264,7 @@ export default function LogExplorer() {
   );
 }
 
-function FilterGroup({ icon, label }: { icon: React.ReactNode, label: string }) {
+function FilterGroup({ icon, label }: { icon: React.ReactNode; label: string }) {
   return (
     <button className="flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-surface-container-high transition-colors text-on-surface-variant text-sm font-medium border-r border-outline-variant/20 last:border-none">
       {icon}
@@ -246,13 +274,13 @@ function FilterGroup({ icon, label }: { icon: React.ReactNode, label: string }) 
   );
 }
 
-function DetailItem({ label, value, variant }: { label: string, value: string, variant?: 'error' | 'tertiary' }) {
+function DetailItem({ label, value, variant }: { label: string; value: string; variant?: 'error' | 'tertiary' }) {
   return (
     <div className="flex justify-between border-b border-outline-variant/10 pb-2">
       <span className="text-on-surface-variant">{label}:</span>
       <span className={cn(
-        "font-bold",
-        variant === 'error' ? "text-error" : variant === 'tertiary' ? "text-tertiary" : "text-on-surface"
+        'font-bold text-right max-w-[60%] truncate',
+        variant === 'error' ? 'text-error' : variant === 'tertiary' ? 'text-tertiary' : 'text-on-surface',
       )}>{value}</span>
     </div>
   );
