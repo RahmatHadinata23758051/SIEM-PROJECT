@@ -24,7 +24,7 @@ import NetworkMap from './components/NetworkMap';
 import AIInsights from './components/AIInsights';
 import Reports from './components/Reports';
 import { useSIEMStream } from './hooks/useSIEMStream';
-import { ShieldAlert, X, ShieldCheck, Activity, Globe, MapPin } from 'lucide-react';
+import { ShieldAlert, X, ShieldCheck, Globe, MapPin } from 'lucide-react';
 
 type View = 'dashboard' | 'threat-hunting' | 'log-explorer' | 'ai-insights' | 'network-map' | 'reports';
 
