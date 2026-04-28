@@ -45,8 +45,18 @@ export default function Login({ onLogin }: LoginProps) {
 
       <div className="w-full max-w-md bg-surface-container border border-outline-variant/30 rounded-2xl p-8 shadow-2xl relative z-10">
         <div className="flex flex-col items-center gap-4 mb-8">
-          <div className="w-16 h-16 bg-surface-container-high rounded-2xl border border-outline-variant/50 flex items-center justify-center shadow-lg">
-            <ShieldCheck className="text-primary" size={32} />
+          <div className="w-20 h-20 bg-surface-container-high rounded-2xl border border-outline-variant/50 flex items-center justify-center shadow-lg overflow-hidden">
+            <img 
+              src="/assets/logo.png" 
+              alt="Aegis Logo" 
+              className="w-full h-full object-contain"
+              onError={(e) => {
+                e.currentTarget.style.display = 'none';
+                const fallback = e.currentTarget.nextElementSibling;
+                if (fallback) (fallback as HTMLElement).style.display = 'block';
+              }}
+            />
+            <ShieldCheck className="text-primary" size={40} style={{ display: 'none' }} />
           </div>
           <div className="text-center">
             <h1 className="text-2xl font-bold tracking-tight text-on-surface">Aegis AI SIEM</h1>

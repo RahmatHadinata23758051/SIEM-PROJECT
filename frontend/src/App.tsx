@@ -153,16 +153,26 @@ export default function App() {
       {/* Sidebar */}
       <aside className="w-64 bg-[#0B0F14] border-r border-outline-variant/30 flex flex-col pt-6 pb-6 shrink-0">
         <div className="px-6 mb-8 flex items-center gap-3">
-          <div className="w-10 h-10 rounded-lg bg-surface-container-highest border border-outline-variant flex items-center justify-center">
-            <Activity className="text-primary w-6 h-6" />
+          <div className="w-10 h-10 bg-primary/10 rounded-xl flex items-center justify-center border border-primary/20 overflow-hidden">
+            <img 
+              src="/assets/logo.png" 
+              alt="Logo" 
+              className="w-full h-full object-contain"
+              onError={(e) => {
+                e.currentTarget.style.display = 'none';
+                const fallback = e.currentTarget.nextElementSibling;
+                if (fallback) (fallback as HTMLElement).style.display = 'block';
+              }}
+            />
+            <ShieldCheck className="text-primary" size={24} style={{ display: 'none' }} />
           </div>
-          <div>
-            <div className="text-primary font-black tracking-tight text-sm uppercase">Hybrid SIEM</div>
+          <span className="font-black text-xl tracking-tighter text-white">AEGIS</span>
+        </div>
+        <div className="px-6 mb-8">
             <div className="text-emerald-500 text-[10px] flex items-center gap-1 mt-0.5 font-bold uppercase tracking-wider">
               <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse shadow-[0_0_8px_#10b981]" />
               Vigilance Active
             </div>
-          </div>
         </div>
 
         <nav className="flex-1 flex flex-col gap-1">
@@ -216,6 +226,19 @@ export default function App() {
         {/* Navbar */}
         <header className="h-16 bg-[#0B0F14]/80 backdrop-blur-lg border-b border-outline-variant/30 flex justify-between items-center px-6 sticky top-0 z-50">
           <div className="flex items-center gap-4 flex-1">
+            <div className="w-8 h-8 rounded-lg bg-surface-container-high border border-outline-variant/50 flex items-center justify-center overflow-hidden">
+              <img 
+                src="/assets/logo.png" 
+                alt="Logo" 
+                className="w-full h-full object-contain"
+                onError={(e) => {
+                  e.currentTarget.style.display = 'none';
+                  const fallback = e.currentTarget.nextElementSibling;
+                  if (fallback) (fallback as HTMLElement).style.display = 'block';
+                }}
+              />
+              <ShieldCheck className="text-primary" size={18} style={{ display: 'none' }} />
+            </div>
             <h2 className="text-lg font-bold tracking-tight text-slate-100 mr-4">Aegis AI SIEM</h2>
             <div className={cn(
               "px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-widest border flex items-center gap-1.5 mr-4",
