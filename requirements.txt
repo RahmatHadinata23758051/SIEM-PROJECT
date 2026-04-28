@@ -3,4 +3,7 @@ pandas
 scikit-learn
 paramiko
 fastapi
+uvicorn
+pyjwt
+websockets
 matplotlib

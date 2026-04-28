@@ -61,18 +61,20 @@ SUSPICIOUS_IPS = [
 def generate_random_feature_record() -> FeatureRecord:
     return FeatureRecord(
         ip=random.choice(SUSPICIOUS_IPS),
-        timestamp=datetime.utcnow().isoformat() + "Z",
+        timestamp=datetime.utcnow(),
         failed_count=random.randint(0, 20),
         request_rate=round(random.uniform(0.0, 0.2), 3),
         username_variance=random.randint(1, 8),
+        inter_arrival_avg=round(random.uniform(0.1, 5.0), 2),
         failed_ratio=round(random.uniform(0.0, 1.0), 2),
-        event_count=random.randint(1, 15)
+        event_count=random.randint(1, 15),
+        total_attempts=random.randint(1, 30)
     )
 
 def decision_to_dict(decision: PipelineDecision) -> Dict[str, Any]:
     return {
         "id": f"evt-{int(time.time()*1000)}-{random.randint(1000,9999)}",
-        "timestamp": decision.feature_record.timestamp,
+        "timestamp": decision.feature_record.timestamp.isoformat() + "Z",
         "ip": decision.feature_record.ip,
         "rule_score": decision.rule_score,
         "anomaly_score": decision.anomaly_score or 0.0,
@@ -88,6 +90,7 @@ def decision_to_dict(decision: PipelineDecision) -> Dict[str, Any]:
         "username_variance": decision.feature_record.username_variance,
         "failed_ratio": decision.feature_record.failed_ratio,
         "event_count": decision.feature_record.event_count,
+        "total_attempts": decision.feature_record.total_attempts,
         "strike_count": decision.watchlist_entry.strike_count,
         "repeat_incidents": decision.watchlist_entry.repeat_incidents,
         "adaptive_sensitivity": decision.watchlist_entry.adaptive_sensitivity,
