@@ -67,7 +67,7 @@ function toLog(event: SIEMEvent): Log {
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function LogExplorer() {
-  const { events, isStreaming, setStreaming, searchQuery, setSearchQuery } = useSIEMStream();
+  const { events, isStreaming, setStreaming, searchQuery, setSearchQuery, setSelectedIp } = useSIEMStream();
 
   const [expandedLog, setExpandedLog] = useState<string | null>(null);
   const [severity,    setSeverity]    = useState<Severity>('ALL');
@@ -207,7 +207,10 @@ export default function LogExplorer() {
                     {log.severity}
                   </span>
                 </div>
-                <div className={cn(log.severity === 'CRIT' ? 'text-error font-bold' : 'text-on-surface-variant')}>
+                <div 
+                  className={cn(log.severity === 'CRIT' ? 'text-error font-bold' : 'text-on-surface-variant', 'hover:underline cursor-pointer')}
+                  onClick={(e) => { e.stopPropagation(); setSelectedIp(log.sourceIp); }}
+                >
                   {log.sourceIp}
                 </div>
                 <div className="truncate font-medium">{log.message}</div>

@@ -10,10 +10,12 @@ import { BrainCircuit } from 'lucide-react';
 import { getNetworkNodes, getTelemetryHistory, type NetworkNode } from '../lib/api';
 import { useSIEMStream } from '../hooks/useSIEMStream';
 
-// ─── Component ────────────────────────────────────────────────────────────────
+interface NetworkMapProps {
+  onNavigate?: (view: string) => void;
+}
 
-export default function NetworkMap() {
-  const { events } = useSIEMStream();
+export default function NetworkMap({ onNavigate }: NetworkMapProps) {
+  const { events, setSearchQuery } = useSIEMStream();
 
   // Derive network nodes from latest events + static layout
   const nodes = useMemo(() => getNetworkNodes(5), []);
@@ -78,19 +80,29 @@ export default function NetworkMap() {
 
           {/* Nodes — driven by getNetworkNodes() */}
           <MapNode x="20%" y="30%" icon={<Globe size={20} />}
-            label={`Ext: ${nodes[0]?.ip ?? '185.15.22.90'}`} />
+            label={`Ext: ${nodes[0]?.ip ?? '185.15.22.90'}`}
+            onClick={() => { setSearchQuery(nodes[0]?.ip ?? ''); onNavigate?.('log-explorer'); }}
+          />
           <MapNode x="40%" y="50%" icon={<Activity size={24} />}
             label={nodes[1]?.label ?? 'Proxy-DMZ-01'}
             status={nodes[1]?.risk_level === 'high' ? 'danger' : undefined}
-            isPulse={nodes[1]?.risk_level === 'high'} />
+            isPulse={nodes[1]?.risk_level === 'high'}
+            onClick={() => { setSearchQuery(nodes[1]?.ip ?? ''); onNavigate?.('log-explorer'); }}
+          />
           <MapNode x="65%" y="35%" icon={<Database size={20} />}
             label={nodes[2]?.label ?? 'Core-DB-Auth'}
-            status={nodes[2]?.risk_level === 'high' || nodes[2]?.risk_level === 'medium' ? 'danger' : undefined} />
+            status={nodes[2]?.risk_level === 'high' || nodes[2]?.risk_level === 'medium' ? 'danger' : undefined}
+            onClick={() => { setSearchQuery(nodes[2]?.ip ?? ''); onNavigate?.('log-explorer'); }}
+          />
           <MapNode x="85%" y="55%" icon={<ShieldCheck size={20} />}
             label={nodes[3]?.label ?? 'FileShare-HR'}
-            status={nodes[3]?.risk_level === 'normal' ? 'success' : undefined} />
+            status={nodes[3]?.risk_level === 'normal' ? 'success' : undefined}
+            onClick={() => { setSearchQuery(nodes[3]?.ip ?? ''); onNavigate?.('log-explorer'); }}
+          />
           <MapNode x="35%" y="75%" icon={<Users size={20} />}
-            label={nodes[4]?.label ?? 'User-Subnet-A'} />
+            label={nodes[4]?.label ?? 'User-Subnet-A'}
+            onClick={() => { setSearchQuery(nodes[4]?.ip ?? ''); onNavigate?.('log-explorer'); }}
+          />
 
           {/* Legend */}
           <div className="absolute bottom-6 left-6 bg-surface-container/80 backdrop-blur-md p-4 rounded-xl border border-outline-variant/30 space-y-3 shadow-xl">
@@ -193,12 +205,13 @@ function ControlButton({ icon }: { icon: React.ReactNode }) {
   );
 }
 
-function MapNode({ x, y, icon, label, status, isPulse }: {
+function MapNode({ x, y, icon, label, status, isPulse, onClick }: {
   x: string; y: string; icon: React.ReactNode; label: string;
-  status?: 'danger' | 'success'; isPulse?: boolean;
+  status?: 'danger' | 'success'; isPulse?: boolean; onClick?: () => void;
 }) {
   return (
     <div
+      onClick={onClick}
       className="absolute flex flex-col items-center group cursor-pointer transition-transform hover:scale-110"
       style={{ left: x, top: y, transform: 'translate(-50%, -50%)' }}
     >

@@ -22,7 +22,7 @@ import LogExplorer from './components/LogExplorer';
 import ThreatHunting from './components/ThreatHunting';
 import NetworkMap from './components/NetworkMap';
 import { useSIEMStream } from './hooks/useSIEMStream';
-import { ShieldAlert, X } from 'lucide-react';
+import { ShieldAlert, X, ShieldCheck, Activity, Globe, MapPin } from 'lucide-react';
 
 type View = 'dashboard' | 'threat-hunting' | 'log-explorer' | 'ai-insights' | 'network-map' | 'reports';
 
@@ -30,7 +30,7 @@ export default function App() {
   const [activeView, setActiveView] = useState<View>('dashboard');
   const [dismissedToasts, setDismissedToasts] = useState<Set<string>>(new Set());
 
-  const { events, searchQuery, setSearchQuery } = useSIEMStream();
+  const { events, searchQuery, setSearchQuery, selectedIp, setSelectedIp } = useSIEMStream();
   
   // Badge: Count CRIT events
   const critEvents = events.filter(e => e.risk_level === 'high' || e.risk_level === 'medium');
@@ -48,7 +48,7 @@ export default function App() {
             initial={{ opacity: 0, y: 50, scale: 0.9 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 20, scale: 0.9 }}
-            className="absolute bottom-6 right-6 z-50 bg-surface-container-high border border-error/40 shadow-[0_8px_30px_rgb(0,0,0,0.5)] rounded-xl p-4 min-w-[320px] flex gap-4"
+            className="absolute bottom-6 right-6 z-[60] bg-surface-container-high border border-error/40 shadow-[0_8px_30px_rgb(0,0,0,0.5)] rounded-xl p-4 min-w-[320px] flex gap-4"
           >
             <div className="w-10 h-10 rounded-full bg-error/20 flex items-center justify-center shrink-0">
               <ShieldAlert className="text-error" size={20} />
@@ -66,6 +66,69 @@ export default function App() {
               </div>
             </div>
           </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* IP Drill-down Modal */}
+      <AnimatePresence>
+        {selectedIp && (
+          <>
+            <motion.div 
+              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              className="absolute inset-0 bg-background/80 backdrop-blur-sm z-[70]"
+              onClick={() => setSelectedIp(null)}
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-[80] bg-surface-container border border-outline-variant/30 rounded-2xl p-6 w-full max-w-lg shadow-2xl flex flex-col gap-6"
+            >
+              <div className="flex justify-between items-start border-b border-outline-variant/30 pb-4">
+                <div className="flex items-center gap-4">
+                  <div className="w-12 h-12 rounded-full bg-surface-container-high border border-outline-variant/50 flex items-center justify-center">
+                    <Globe className="text-primary" size={24} />
+                  </div>
+                  <div>
+                    <h2 className="text-xl font-bold font-mono text-on-surface">{selectedIp}</h2>
+                    <p className="text-xs text-on-surface-variant uppercase tracking-widest font-bold flex items-center gap-1 mt-1">
+                      <MapPin size={12} /> Unknown Location
+                    </p>
+                  </div>
+                </div>
+                <button onClick={() => setSelectedIp(null)} className="text-on-surface-variant hover:text-on-surface p-1 rounded-lg hover:bg-surface-container-highest transition-colors">
+                  <X size={20} />
+                </button>
+              </div>
+              
+              <div className="grid grid-cols-2 gap-4">
+                <div className="bg-surface-container-low p-4 rounded-xl border border-outline-variant/20 flex flex-col gap-1">
+                  <span className="text-[10px] uppercase font-bold text-on-surface-variant tracking-widest">Total Events (24h)</span>
+                  <span className="text-xl font-black text-on-surface">{events.filter(e => e.ip === selectedIp).length}</span>
+                </div>
+                <div className="bg-surface-container-low p-4 rounded-xl border border-outline-variant/20 flex flex-col gap-1">
+                  <span className="text-[10px] uppercase font-bold text-on-surface-variant tracking-widest">Last Activity</span>
+                  <span className="text-sm font-bold text-on-surface mt-auto">Just now</span>
+                </div>
+              </div>
+
+              <div className="flex gap-3 mt-2">
+                <button 
+                  onClick={() => {
+                    setSearchQuery(selectedIp);
+                    setActiveView('log-explorer');
+                    setSelectedIp(null);
+                  }}
+                  className="flex-1 py-2 bg-surface-container-high border border-outline-variant/30 rounded-lg text-xs font-bold uppercase tracking-widest hover:bg-surface-container-highest transition-colors text-on-surface"
+                >
+                  View Logs
+                </button>
+                <button className="flex-1 py-2 bg-error/10 border border-error/40 text-error rounded-lg text-xs font-bold uppercase tracking-widest hover:bg-error/20 transition-colors">
+                  Block IP
+                </button>
+              </div>
+            </motion.div>
+          </>
         )}
       </AnimatePresence>
 
@@ -180,7 +243,7 @@ export default function App() {
               {activeView === 'dashboard' && <Dashboard />}
               {activeView === 'log-explorer' && <LogExplorer />}
               {activeView === 'threat-hunting' && <ThreatHunting />}
-              {activeView === 'network-map' && <NetworkMap />}
+              {activeView === 'network-map' && <NetworkMap onNavigate={setActiveView} />}
               {(activeView !== 'dashboard' && activeView !== 'log-explorer' && activeView !== 'threat-hunting' && activeView !== 'network-map') && (
                 <div className="p-8 text-center text-on-surface-variant flex flex-col items-center justify-center h-full gap-4">
                   <Activity size={48} className="text-outline-variant" />
