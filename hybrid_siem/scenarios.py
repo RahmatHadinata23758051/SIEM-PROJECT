@@ -101,6 +101,76 @@ def _scenario_lines() -> list[ScenarioDefinition]:
                 "Apr 28 12:02:18 ubuntu sshd[5418]: Failed password for admin from 198.51.100.23 port 62018 ssh2",
             ),
         ),
+        ScenarioDefinition(
+            name="low_and_slow_distributed",
+            description="Adversarial: Many IPs attacking slowly and independently to stay under threshold.",
+            expected_peak_action="monitor",
+            expected_final_action="monitor",
+            log_lines=(
+                # 10 different IPs, each attacking very slowly (1 failure per 3-4 minutes)
+                "Apr 28 13:00:01 ubuntu sshd[5501]: Failed password for root from 192.0.2.1 port 63001 ssh2",
+                "Apr 28 13:03:22 ubuntu sshd[5502]: Failed password for root from 192.0.2.2 port 63002 ssh2",
+                "Apr 28 13:06:45 ubuntu sshd[5503]: Failed password for root from 192.0.2.3 port 63003 ssh2",
+                "Apr 28 13:10:10 ubuntu sshd[5504]: Failed password for root from 192.0.2.4 port 63004 ssh2",
+                "Apr 28 13:13:35 ubuntu sshd[5505]: Failed password for root from 192.0.2.5 port 63005 ssh2",
+                "Apr 28 13:16:58 ubuntu sshd[5506]: Failed password for root from 192.0.2.6 port 63006 ssh2",
+                "Apr 28 13:20:20 ubuntu sshd[5507]: Failed password for root from 192.0.2.7 port 63007 ssh2",
+                "Apr 28 13:23:42 ubuntu sshd[5508]: Failed password for root from 192.0.2.8 port 63008 ssh2",
+                "Apr 28 13:27:05 ubuntu sshd[5509]: Failed password for root from 192.0.2.9 port 63009 ssh2",
+                "Apr 28 13:30:28 ubuntu sshd[5510]: Failed password for root from 192.0.2.10 port 63010 ssh2",
+            ),
+        ),
+        ScenarioDefinition(
+            name="username_reuse_attack",
+            description="Adversarial: Low variance in usernames, high persistence, mimics credential stuffing.",
+            expected_peak_action="rate_limit",
+            expected_final_action="rate_limit",
+            log_lines=(
+                # Same 2-3 usernames tried repeatedly over long period
+                "Apr 28 14:00:01 ubuntu sshd[5601]: Failed password for admin from 203.0.113.10 port 64001 ssh2",
+                "Apr 28 14:00:18 ubuntu sshd[5602]: Failed password for root from 203.0.113.10 port 64002 ssh2",
+                "Apr 28 14:00:35 ubuntu sshd[5603]: Failed password for admin from 203.0.113.10 port 64003 ssh2",
+                "Apr 28 14:00:52 ubuntu sshd[5604]: Failed password for root from 203.0.113.10 port 64004 ssh2",
+                "Apr 28 14:01:09 ubuntu sshd[5605]: Failed password for admin from 203.0.113.10 port 64005 ssh2",
+                "Apr 28 14:01:26 ubuntu sshd[5606]: Failed password for root from 203.0.113.10 port 64006 ssh2",
+                "Apr 28 14:02:05 ubuntu sshd[5607]: Failed password for admin from 203.0.113.10 port 64007 ssh2",
+                "Apr 28 14:02:22 ubuntu sshd[5608]: Failed password for root from 203.0.113.10 port 64008 ssh2",
+            ),
+        ),
+        ScenarioDefinition(
+            name="human_like_attack",
+            description="Adversarial: Random delays, mix of success and failures to mimic human behavior.",
+            expected_peak_action="rate_limit",
+            expected_final_action="monitor",
+            log_lines=(
+                # Mix of successful and failed attempts with varying intervals
+                "Apr 28 15:00:05 ubuntu sshd[5701]: Accepted password for user01 from 198.51.100.99 port 65001 ssh2",
+                "Apr 28 15:02:47 ubuntu sshd[5702]: Failed password for user01 from 198.51.100.99 port 65002 ssh2",
+                "Apr 28 15:03:20 ubuntu sshd[5703]: Accepted password for user01 from 198.51.100.99 port 65003 ssh2",
+                "Apr 28 15:05:55 ubuntu sshd[5704]: Failed password for user02 from 198.51.100.99 port 65004 ssh2",
+                "Apr 28 15:06:12 ubuntu sshd[5705]: Failed password for user02 from 198.51.100.99 port 65005 ssh2",
+                "Apr 28 15:08:40 ubuntu sshd[5706]: Accepted password for user01 from 198.51.100.99 port 65006 ssh2",
+                "Apr 28 15:10:15 ubuntu sshd[5707]: Failed password for admin from 198.51.100.99 port 65007 ssh2",
+                "Apr 28 15:12:38 ubuntu sshd[5708]: Failed password for admin from 198.51.100.99 port 65008 ssh2",
+                "Apr 28 15:15:42 ubuntu sshd[5709]: Accepted password for user01 from 198.51.100.99 port 65009 ssh2",
+            ),
+        ),
+        ScenarioDefinition(
+            name="mimic_normal_traffic",
+            description="Adversarial: Intersperse attack with legitimate activity to evade detection.",
+            expected_peak_action="monitor",
+            expected_final_action="normal",
+            log_lines=(
+                # Legitimate activity mixed with attack attempts
+                "Apr 28 16:00:10 ubuntu sshd[5801]: Accepted publickey for analyst from 203.0.113.15 port 66001 ssh2",
+                "Apr 28 16:01:02 ubuntu sshd[5802]: Failed password for attacker from 203.0.113.15 port 66002 ssh2",
+                "Apr 28 16:02:15 ubuntu sshd[5803]: Accepted publickey for analyst from 203.0.113.15 port 66003 ssh2",
+                "Apr 28 16:03:20 ubuntu sshd[5804]: Failed password for attacker from 203.0.113.15 port 66004 ssh2",
+                "Apr 28 16:04:30 ubuntu sshd[5805]: Accepted password for analyst from 203.0.113.15 port 66005 ssh2",
+                "Apr 28 16:05:45 ubuntu sshd[5806]: Failed password for attacker from 203.0.113.15 port 66006 ssh2",
+                "Apr 28 16:07:00 ubuntu sshd[5807]: Accepted publickey for analyst from 203.0.113.15 port 66007 ssh2",
+            ),
+        ),
     ]
 
 

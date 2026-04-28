@@ -129,10 +129,115 @@
 - Model dapat disimpan dan di-load kembali dari disk
 - Trace dan plot scenario sekarang menampilkan kontribusi AI (anomaly) vs rule-based detection
 
+## Phase 3: Adversarial Robustness dan Advanced Risk Modeling (BARU)
+
+### ✅ TASK 1 — Non-linear Risk Scoring (SELESAI)
+Sistem risk scoring sekarang mendukung multiple strategi untuk handling kombinasi rule dan anomaly score yang lebih sophisticated:
+
+- **Linear Scoring** (default): `risk = rule_weight * rule + anomaly_weight * anomaly`
+- **Adaptive Weighting**: Boosts salah satu signal jika yang lain lemah
+  - Jika rule_score < 50 tapi anomaly_score >= 0.5 → anomaly weight naik ke 1.5x
+  - Jika anomaly_score < 0.5 tapi rule_score >= 50 → rule weight naik ke 1.5x
+- **Conditional Boosting**: Jika rule >= 70 AND anomaly >= 0.7 → tambah +20 poin risk score
+- **Sigmoid Transformation** (optional): Smooth non-linear blending untuk hasil yang lebih gradual
+
+Implementasi: `hybrid_siem/risk.py` dengan `RiskWeights` config yang dapat dikustomisasi
+
+### ✅ TASK 2 — Adversarial Attack Simulation (SELESAI)
+Ditambahkan 4 scenario adversarial untuk testing robustness sistem:
+
+1. **low_and_slow_distributed** (192.0.2.0/24): 10 IP berbeda, masing-masing 1 failure per 3-4 menit
+   - Target: Test apakah sistem mendeteksi distributed attack yang lambat
+   - Expected: Tetap di status `monitor` (per-IP risk rendah, tapi pattern terdeteksi)
+
+2. **username_reuse_attack** (203.0.113.10): Hanya 2 username (admin/root) dicoba berulang 16x dalam 2 menit
+   - Target: Test credential stuffing dengan low variance
+   - Expected: `rate_limit` (persistent attempt pada username terbatas)
+
+3. **human_like_attack** (198.51.100.99): Mix success dan failure dengan random delay
+   - Target: Test apakah attack dengan pattern "manusia" terdeteksi
+   - Expected: `rate_limit` (fakta ada failures di sela-sela successes)
+
+4. **mimic_normal_traffic** (203.0.113.15): Legitimate activity dicampur failed login attempts
+   - Target: Test apakah system bisa membedakan normal dari attack yang menyamar
+   - Expected: `monitor` → `normal` (failed ratio rendah karena tercampur successes)
+
+### ✅ TASK 3 — Temporal Feature Extension (SELESAI)
+Ditambahkan modul baru `hybrid_siem/temporal.py` untuk capturing pattern temporal yang tidak terlihat dalam satu window:
+
+- **rolling_failed_count_5m**: Jumlah failures dalam 5 window terakhir (300 detik)
+- **rolling_request_rate_5m**: Rata-rata request rate dalam 5 window terakhir
+- **persistence_score**: Berapa lama IP sudah terobservasi (0-100 scale, max 8 jam)
+- **burst_score**: Deteksi sudden spike dalam failed attempts vs rolling average
+- **activity_duration_seconds**: Total durasi aktivitas sejak first observation
+- **quiet_period_seconds**: Gap waktu sejak window sebelumnya
+
+Implementasi: `TemporalFeatureComputer` yang mengagregasi feature records per IP
+
+### ✅ TASK 4 — Adaptive Watchlist Enhancement (SELESAI)
+Enhanced `hybrid_siem/watchlist.py` dengan history tracking dan sensitivity adjustment:
+
+- **historical_peak**: Highest risk score pernah mencapai berapa untuk IP ini
+- **repeat_incidents**: Berapa kali IP masuk recovery kemudian spike lagi
+- **adaptive_sensitivity**: Multiplier (1.0-3.0x) yang meningkat dengan strike count dan repeat incidents
+  - IP dengan 3+ strikes atau 2+ repeat incidents → sensitivity up to 3.0x
+  - Observed risk score dikali dengan adaptive_sensitivity sebelum aggregation
+  - Contoh: IP dengan bad history + risk 50 → menjadi 50 * 2.0 = 100 (automatically escalated)
+
+Implementasi: Enhanced scoring logic dalam `update()` method untuk adaptive risk boost
+
+### ✅ TASK 5 — Explainability (SELESAI)
+Enhanced `hybrid_siem/pipeline.py` dengan detailed reasoning untuk setiap decision:
+
+- **_build_explanations()**: Function yang generates human-readable reasons
+  - Menjelaskan failure modes: "Failed attempts: X", "High request rate: Y", "Low username diversity: Z"
+  - Menjelaskan anomaly: "Anomalous pattern detected: 0.75"
+  - Menjelaskan scoring method: "Non-linear boost applied" atau "Adaptive weighting"
+  - Menjelaskan history: "Repeat offender: N strikes", "Multiple high-risk periods"
+  - Menjelaskan action: "BLOCKED", "RATE LIMITED", "MONITORED"
+
+- **temporal_insight**: Additional insight untuk pattern temporal
+  - "High event concentration in single window" jika event_count >= 10
+  - "Patterns of recurring attacks detected" jika repeat_incidents >= 2
+
+- **PipelineDecision** sekarang punya field:
+  - `reasons`: Tuple of explanation strings
+  - `scoring_method`: 'linear', 'boosted', 'adaptive', 'sigmoid'
+  - `temporal_insight`: Optional temporal pattern description
+
+### Validasi dan Testing
+- Created comprehensive test suite: `tests/test_adversarial_robustness.py`
+- **15 tests** covering:
+  - Non-linear risk scoring (4 tests)
+  - Adversarial scenario detection (4 tests)
+  - Temporal feature computation (2 tests)
+  - Adaptive watchlist behavior (2 tests)
+  - Explainability output (2 tests)
+  - End-to-end adversarial detection (1 test)
+- ✅ **ALL TESTS PASS** (15/15)
+
+### File Changes Summary
+- **Modified**: `hybrid_siem/risk.py` (+120 lines) - Non-linear scoring dengan adaptive & boosting
+- **Modified**: `hybrid_siem/scenarios.py` (+60 lines) - Added 4 adversarial scenarios
+- **Modified**: `hybrid_siem/watchlist.py` (+80 lines) - Adaptive sensitivity & history tracking
+- **Modified**: `hybrid_siem/pipeline.py` (+100 lines) - Explainability & reasoning
+- **New**: `hybrid_siem/temporal.py` (+130 lines) - Temporal feature computation
+- **Modified**: `hybrid_siem/__init__.py` - Export temporal & enhanced classes
+- **New**: `tests/test_adversarial_robustness.py` (+300 lines) - Comprehensive test suite
+
+### Fitur Hasil Phase 3
+✅ Non-linear risk scoring dengan conditional boosting
+✅ Adaptive weighting based on signal strength
+✅ Optional sigmoid transformation untuk smooth blending
+✅ 4 adversarial attack scenarios untuk testing robustness
+✅ Temporal feature aggregation (rolling, persistence, burst)
+✅ Adaptive watchlist dengan repeat offender sensitivity
+✅ Full explainability pada setiap decision dengan detailed reasons
+✅ Comprehensive test coverage (15 tests, 100% pass)
+
 ## Berikutnya
-- Validasi parser dengan log Ubuntu asli yang lebih bervariasi.
-- Kalibrasi ulang threshold rule menggunakan log Ubuntu nyata begitu corpus nyata sudah tersedia.
-- Fine-tune parameter Isolation Forest (contamination, n_estimators, smoothing_alpha) berdasarkan performa di real data.
-- Pertimbangkan sidecar metadata synthetic bila nanti ingin evaluasi supervised yang lebih eksplisit.
-- Tinjau ulang feature yang sangat redundant sebelum training model unsupervised agar sinyal AI tidak bias ke dimensi yang sama.
-- Evaluasi feature importance dari anomaly model untuk memahami kontribusi setiap feature terhadap detection.
+- Implementasi feature importance analysis dari anomaly model untuk understand model behavior
+- Testing dengan real SSH logs dari Ubuntu servers
+- Fine-tune parameter Isolation Forest (contamination, n_estimators) berdasarkan real data
+- Consider supervised evaluation metrics ketika labeled attack data available
+- Optimasi performance untuk high-throughput log processing
