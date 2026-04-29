@@ -7,3 +7,7 @@ uvicorn
 pyjwt
 websockets
 matplotlib
+sqlalchemy[asyncio]
+aiosqlite
+aiohttp
+asyncpg

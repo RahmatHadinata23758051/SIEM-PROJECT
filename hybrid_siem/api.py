@@ -16,8 +16,10 @@ from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDiscon
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from hybrid_siem.alerting import AlertManager
 from hybrid_siem.anomaly import IsolationForestConfig, fit_isolation_forest
 from hybrid_siem.calibration import select_likely_normal_records
+from hybrid_siem.correlation.engine import CorrelationEngine
 from hybrid_siem.detection import RuleThresholds
 from hybrid_siem.features import build_feature_records
 from hybrid_siem.models import FeatureRecord, SshAuthEvent
@@ -84,6 +86,48 @@ class StreamRuntimeStats:
     total_events_sent: int = 0
     broadcast_errors: int = 0
     last_batch_at: datetime | None = None
+    queue_drops: int = 0
+
+
+# ---------------------------------------------------------
+# Circuit Breaker for WebSocket streaming
+# ---------------------------------------------------------
+_QUEUE_MAX_SIZE = 50     # max pending batches before dropping (backpressure)
+_CIRCUIT_OPEN_THRESHOLD = 10   # consecutive broadcast errors before opening circuit
+_CIRCUIT_RESET_SECONDS = 30    # seconds to wait before re-trying after circuit opens
+
+
+@dataclass(slots=True)
+class CircuitBreaker:
+    """Simple circuit breaker to protect WebSocket broadcast."""
+    failure_count: int = 0
+    is_open: bool = False
+    opened_at: datetime | None = None
+
+    def record_failure(self) -> None:
+        self.failure_count += 1
+        if self.failure_count >= _CIRCUIT_OPEN_THRESHOLD:
+            self.is_open = True
+            self.opened_at = utc_now()
+            print(f"[CircuitBreaker] OPEN — too many broadcast errors ({self.failure_count})")
+
+    def record_success(self) -> None:
+        self.failure_count = 0
+        if self.is_open:
+            self.is_open = False
+            print("[CircuitBreaker] CLOSED — broadcast recovered")
+
+    def should_allow(self) -> bool:
+        if not self.is_open:
+            return True
+        # Half-open: try again after reset window
+        elapsed = (utc_now() - self.opened_at).total_seconds() if self.opened_at else 999
+        if elapsed >= _CIRCUIT_RESET_SECONDS:
+            self.is_open = False
+            self.failure_count = 0
+            print("[CircuitBreaker] HALF-OPEN — retrying")
+            return True
+        return False
 
 
 @app.post("/api/auth/login")
@@ -104,7 +148,13 @@ async def login(req: LoginRequest):
 thresholds = RuleThresholds()
 weights = RiskWeights()
 stream_watchlist = WatchlistManager()
+correlation_engine = CorrelationEngine()
+alert_manager = AlertManager()
+circuit_breaker = CircuitBreaker()
 backend_started_at = utc_now()
+
+# Async backpressure queue — event batches enqueued here before broadcast
+_event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=_QUEUE_MAX_SIZE)
 
 anomaly_model = None
 parsed_auth_events: list[SshAuthEvent] = []
@@ -245,6 +295,7 @@ def decision_to_dict(decision: PipelineDecision) -> Dict[str, Any]:
         "risk_score": round(decision.risk_score, 2),
         "risk_level": decision.risk_level,
         "action": decision.action,
+        "confidence": round(decision.confidence, 3),
         "reasons": list(decision.reasons),
         "scoring_method": decision.scoring_method,
         "temporal_insight": decision.temporal_insight,
@@ -452,8 +503,8 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
-async def event_generator():
-    """Continuously stream PipelineDecision events from real data."""
+async def event_producer():
+    """Produce scored decision batches and put them into the async queue (backpressure)."""
     while True:
         await asyncio.sleep(2)
         if not manager.active_connections:
@@ -466,21 +517,79 @@ async def event_generator():
         try:
             decisions = _score_records(records, watchlist=stream_watchlist)
             payload = [decision_to_dict(decision) for decision in decisions]
-            await manager.broadcast(
-                {
-                    "type": "events_batch",
-                    "data": payload,
-                    "timestamp": iso_utc(utc_now()),
-                }
-            )
+
+            # Feed alert manager
+            for d in decisions:
+                alert_manager.process_decision(
+                    ip=d.feature_record.ip,
+                    risk_score=d.risk_score,
+                    action=d.action,
+                    reasons=d.reasons,
+                    timestamp=d.feature_record.timestamp,
+                )
+
+            batch = {
+                "type": "events_batch",
+                "data": payload,
+                "timestamp": iso_utc(utc_now()),
+            }
+
+            # Backpressure: drop oldest if queue full
+            if _event_queue.full():
+                try:
+                    _event_queue.get_nowait()
+                    runtime_stats.queue_drops += 1
+                except asyncio.QueueEmpty:
+                    pass
+
+            _event_queue.put_nowait(batch)
+
         except Exception as exc:
             print(f"[WARN] Error processing records: {exc}")
 
 
+async def event_consumer():
+    """Consume batches from queue and broadcast via WebSocket with circuit breaker."""
+    while True:
+        batch = await _event_queue.get()
+
+        if not circuit_breaker.should_allow():
+            _event_queue.task_done()
+            continue
+
+        try:
+            await manager.broadcast(batch)
+            circuit_breaker.record_success()
+        except Exception as exc:
+            print(f"[WARN] Broadcast error: {exc}")
+            circuit_breaker.record_failure()
+        finally:
+            _event_queue.task_done()
+
+
+async def alert_auto_resolve_task():
+    """Periodically auto-resolve stale alerts."""
+    while True:
+        await asyncio.sleep(60)
+        resolved = alert_manager.auto_resolve_stale()
+        if resolved:
+            print(f"[AlertManager] Auto-resolved {len(resolved)} stale alerts")
+
+
 @app.on_event("startup")
 async def startup_event():
+    # Initialize SQLite/PostgreSQL tables
+    try:
+        from hybrid_siem.database import init_db
+        await init_db()
+        print("[OK] Database initialized")
+    except Exception as exc:
+        print(f"[WARN] Database init failed: {exc}")
+
     load_real_data()
-    asyncio.create_task(event_generator())
+    asyncio.create_task(event_producer())
+    asyncio.create_task(event_consumer())
+    asyncio.create_task(alert_auto_resolve_task())
 
 
 @app.websocket("/api/stream")
@@ -728,3 +837,65 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run("hybrid_siem.api:app", host="127.0.0.1", port=8001, reload=True)
+
+
+# ---------------------------------------------------------------------------
+# Alert Management Endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/alerts")
+async def get_alerts():
+    """Return all active alerts."""
+    return alert_manager.active_alerts()
+
+
+@app.get("/api/alerts/all")
+async def get_all_alerts(limit: int = 100):
+    """Return full alert history (paginated)."""
+    return alert_manager.all_alerts(limit=limit)
+
+
+@app.get("/api/alerts/stats")
+async def get_alert_stats():
+    """Return alert count stats by severity and state."""
+    return alert_manager.stats()
+
+
+class AlertActionRequest(BaseModel):
+    alert_id: str
+
+
+@app.post("/api/alerts/acknowledge")
+async def acknowledge_alert(req: AlertActionRequest):
+    alert = alert_manager.acknowledge(req.alert_id)
+    if alert is None:
+        raise HTTPException(status_code=404, detail="Alert not found or already resolved")
+    return alert.to_dict()
+
+
+@app.post("/api/alerts/resolve")
+async def resolve_alert(req: AlertActionRequest):
+    alert = alert_manager.resolve(req.alert_id)
+    if alert is None:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    return alert.to_dict()
+
+
+@app.get("/api/system/health")
+async def get_system_health():
+    """Return runtime health including circuit breaker and queue status."""
+    return {
+        "status": "ok",
+        "queue_size": _event_queue.qsize(),
+        "queue_capacity": _QUEUE_MAX_SIZE,
+        "queue_drops": runtime_stats.queue_drops,
+        "circuit_breaker_open": circuit_breaker.is_open,
+        "circuit_breaker_failures": circuit_breaker.failure_count,
+        "active_ws_connections": len(manager.active_connections),
+        "total_batches_sent": runtime_stats.total_batches_sent,
+        "total_events_sent": runtime_stats.total_events_sent,
+        "broadcast_errors": runtime_stats.broadcast_errors,
+        "alert_stats": alert_manager.stats(),
+        "model_loaded": anomaly_model is not None,
+        "records_loaded": len(real_feature_records),
+    }

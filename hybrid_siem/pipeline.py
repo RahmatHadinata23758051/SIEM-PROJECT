@@ -39,6 +39,7 @@ class PipelineDecision:
     watchlist_entry: WatchlistEntry
     action: str
     reasons: tuple[str, ...]
+    confidence: float = 1.0
     scoring_method: str = "linear"
     temporal_insight: str = ""
 
@@ -122,6 +123,8 @@ def _build_explanations(
     return tuple(reasons) if reasons else ("No anomalies detected",)
 
 
+from hybrid_siem.correlation.engine import CorrelationEngine
+
 def process_feature_records(
     records: Iterable[FeatureRecord],
     thresholds: RuleThresholds | None = None,
@@ -129,6 +132,7 @@ def process_feature_records(
     watchlist: WatchlistManager | None = None,
     anomaly_scores: dict[tuple[str, object], float | AnomalyScore] | None = None,
     anomaly_detector: IsolationForestAnomalyDetector | None = None,
+    correlation_engine: CorrelationEngine | None = None,
 ) -> list[PipelineDecision]:
     """Process feature records through the complete pipeline.
     
@@ -139,6 +143,7 @@ def process_feature_records(
         watchlist: Watchlist manager
         anomaly_scores: Pre-computed anomaly scores
         anomaly_detector: Anomaly detector for scoring
+        correlation_engine: Cross-source correlation engine
     
     Returns:
         List of pipeline decisions with full explanations
@@ -146,6 +151,7 @@ def process_feature_records(
     thresholds = thresholds or RuleThresholds()
     weights = weights or RiskWeights()
     watchlist = watchlist or WatchlistManager()
+    correlation_engine = correlation_engine or CorrelationEngine()
     ordered_records = sorted(records, key=lambda item: (item.timestamp, item.ip))
     anomaly_scores = anomaly_scores or {}
 
@@ -156,29 +162,44 @@ def process_feature_records(
     for record in ordered_records:
         rule_result = score_feature_record(record, thresholds=thresholds)
         anomaly_score, raw_anomaly_score = _extract_anomaly_scores(anomaly_scores.get((record.ip, record.timestamp)))
+        
+        # Cross-source correlation
+        correlation_penalty, correlation_reasons = correlation_engine.evaluate(record)
+        
         risk_result: RiskScoreResult = compute_risk_score(
             rule_score=rule_result.rule_score,
             anomaly_score=anomaly_score,
             weights=weights,
         )
+        
+        # Apply correlation penalty
+        final_risk_score = min(risk_result.risk_score + correlation_penalty, 100.0)
+        
         watchlist_entry = watchlist.update(
             ip=record.ip,
             observed_at=record.timestamp,
-            observed_risk_score=risk_result.risk_score,
+            observed_risk_score=final_risk_score,
         )
         decision: DecisionOutcome = decide_action(
             risk_score=watchlist_entry.current_risk_score,
             watchlist_entry=watchlist_entry,
+            anomaly_score=anomaly_score,
+            rule_score=rule_result.rule_score,
         )
         
         # Build comprehensive explanations
-        reasons = _build_explanations(
+        reasons = list(_build_explanations(
             record,
             rule_result.rule_score,
             anomaly_score,
             risk_result,
             watchlist_entry,
-        )
+        ))
+        if correlation_reasons:
+            reasons.extend(correlation_reasons)
+        if decision.action == "escalate_manual_review":
+            reasons.append(f"Low confidence ({decision.confidence:.2f}) — escalated for manual review")
+        reasons = tuple(reasons)
         
         # Compute temporal insight (if applicable)
         temporal_insight = ""
@@ -198,6 +219,7 @@ def process_feature_records(
                 watchlist_entry=watchlist_entry,
                 action=decision.action,
                 reasons=reasons,
+                confidence=decision.confidence,
                 scoring_method=risk_result.scoring_method,
                 temporal_insight=temporal_insight,
             )

@@ -5,21 +5,37 @@ from datetime import datetime
 
 
 @dataclass(slots=True, frozen=True)
-class SshAuthEvent:
-    line_number: int
+class SIEMEvent:
     timestamp: datetime
+    ip: str | None
+    source_type: str
+    event_type: str
+    raw_message: str
+
+@dataclass(slots=True, frozen=True)
+class SshAuthEvent(SIEMEvent):
+    line_number: int
     host: str
     process: str
     pid: int | None
     session_id: str | None
-    event_type: str
     outcome: str
-    ip: str | None
     username: str | None
     port: int | None
-    raw_message: str
     is_attempt: bool
 
+@dataclass(slots=True, frozen=True)
+class NginxAccessEvent(SIEMEvent):
+    method: str
+    endpoint: str
+    status_code: int
+    user_agent: str
+
+@dataclass(slots=True, frozen=True)
+class SyslogEvent(SIEMEvent):
+    host: str
+    process: str
+    severity: str
 
 @dataclass(slots=True, frozen=True)
 class SshAuthAttempt:
@@ -34,18 +50,33 @@ class SshAuthAttempt:
     source_event_types: tuple[str, ...]
     event_count: int
 
-
 @dataclass(slots=True, frozen=True)
 class FeatureRecord:
     timestamp: datetime
     ip: str
-    failed_count: int
-    request_rate: float
-    username_variance: int
-    inter_arrival_avg: float | None
-    failed_ratio: float
-    event_count: int
-    total_attempts: int
+    
+    # SSH Features
+    ssh_failed_count: int = 0
+    ssh_request_rate: float = 0.0
+    ssh_username_variance: int = 0
+    ssh_inter_arrival_avg: float | None = None
+    ssh_failed_ratio: float = 0.0
+    ssh_total_attempts: int = 0
+    
+    # HTTP/Nginx Features
+    http_404_count: int = 0
+    http_request_rate: float = 0.0
+    http_unique_endpoints: int = 0
+    http_total_requests: int = 0
+    
+    # Global/Combined Features (Maintained for backward compatibility)
+    failed_count: int = 0
+    request_rate: float = 0.0
+    username_variance: int = 0
+    inter_arrival_avg: float | None = None
+    failed_ratio: float = 0.0
+    event_count: int = 0
+    total_attempts: int = 0
 
     def as_dict(self) -> dict[str, str | int | float | None]:
         return {
@@ -57,4 +88,7 @@ class FeatureRecord:
             "inter_arrival_avg": self.inter_arrival_avg,
             "failed_ratio": self.failed_ratio,
             "event_count": self.event_count,
+            "ssh_failed_count": self.ssh_failed_count,
+            "http_404_count": self.http_404_count,
+            "http_total_requests": self.http_total_requests,
         }

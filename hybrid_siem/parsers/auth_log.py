@@ -140,6 +140,7 @@ def _parse_message(
         port = int(groups["port"]) if groups.get("port") else None
 
         return SshAuthEvent(
+            source_type="auth_log",
             line_number=line_number,
             timestamp=timestamp,
             host=host,

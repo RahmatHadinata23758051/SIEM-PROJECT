@@ -5,11 +5,13 @@ import pickle
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Literal
 
 import numpy as np
 from sklearn.ensemble import IsolationForest
-from sklearn.preprocessing import MinMaxScaler, StandardScaler
+from sklearn.neighbors import LocalOutlierFactor
+from sklearn.preprocessing import MinMaxScaler, RobustScaler, StandardScaler
+from sklearn.svm import OneClassSVM
 
 from hybrid_siem.calibration import select_likely_normal_records
 from hybrid_siem.models import FeatureRecord
@@ -48,8 +50,8 @@ class IsolationForestConfig:
             raise ValueError("contamination must be between 0 and 0.5")
         if self.n_estimators <= 0:
             raise ValueError("n_estimators must be greater than zero")
-        if self.scaler not in {"standard", "minmax"}:
-            raise ValueError("scaler must be either 'standard' or 'minmax'")
+        if self.scaler not in {"standard", "minmax", "robust"}:
+            raise ValueError("scaler must be 'standard', 'minmax', or 'robust'")
         if not 0.0 < self.smoothing_alpha <= 1.0:
             raise ValueError("smoothing_alpha must be between 0 and 1")
         if self.smoothing_window_seconds <= 0:
@@ -90,7 +92,7 @@ class AnomalyScore:
 class IsolationForestAnomalyDetector:
     config: IsolationForestConfig
     training_report: AnomalyTrainingReport
-    scaler: StandardScaler | MinMaxScaler
+    scaler: StandardScaler | MinMaxScaler | RobustScaler
     estimator: IsolationForest
     normalization_min: float
     normalization_max: float
@@ -203,9 +205,12 @@ def _build_feature_matrix(
     )
 
 
-def _build_scaler(scaler_name: str) -> StandardScaler | MinMaxScaler:
+def _build_scaler(scaler_name: str) -> StandardScaler | MinMaxScaler | RobustScaler:
     if scaler_name == "minmax":
         return MinMaxScaler()
+    if scaler_name == "robust":
+        # RobustScaler is less sensitive to outliers — ideal for burst attack features
+        return RobustScaler(quantile_range=(25.0, 75.0))
     return StandardScaler()
 
 
@@ -314,3 +319,139 @@ def fit_isolation_forest(
 
 def load_isolation_forest(model_path: str | Path) -> IsolationForestAnomalyDetector:
     return IsolationForestAnomalyDetector.load(model_path)
+
+
+# ---------------------------------------------------------------------------
+# Step 4: Alternative ML Models — LOF & One-Class SVM
+# ---------------------------------------------------------------------------
+
+@dataclass(slots=True)
+class LOFAnomalyDetector:
+    """Local Outlier Factor detector.
+
+    More effective than IsolationForest on small datasets and datasets with
+    locally dense clusters (e.g. scanning attacks that mimic normal traffic).
+    NOTE: LOF is transductive — it cannot .predict() on new data without
+    re-fitting. We use novelty=True to allow inference on new records.
+    """
+    feature_names: tuple[str, ...]
+    imputation_values: dict[str, float]
+    scaler: StandardScaler | RobustScaler
+    estimator: LocalOutlierFactor
+
+    def score_records(self, records: Iterable[FeatureRecord]) -> list[AnomalyScore]:
+        ordered_records = sorted(records, key=lambda r: (r.timestamp, r.ip))
+        if not ordered_records:
+            return []
+        matrix = _build_feature_matrix(ordered_records, self.feature_names, self.imputation_values)
+        scaled = self.scaler.transform(matrix)
+        # negative_outlier_factor_: lower = more anomalous; score_samples mirrors that
+        raw_scores = -self.estimator.score_samples(scaled)  # type: ignore[attr-defined]
+        norm_min, norm_max = float(np.min(raw_scores)), float(np.max(raw_scores))
+        normalized = np.clip((raw_scores - norm_min) / max(1e-6, norm_max - norm_min), 0.0, 1.0)
+        smoothed = _smooth_scores(ordered_records, normalized, alpha=0.35, window_seconds=60)
+        return [
+            AnomalyScore(
+                ip=r.ip,
+                timestamp=r.timestamp,
+                raw_model_score=round(float(raw), 6),
+                anomaly_score=round(float(norm), 4),
+                smoothed_score=round(float(sm), 4),
+            )
+            for r, raw, norm, sm in zip(ordered_records, raw_scores, normalized, smoothed)
+        ]
+
+    def score_lookup(self, records: Iterable[FeatureRecord]) -> dict[tuple[str, object], AnomalyScore]:
+        return {(s.ip, s.timestamp): s for s in self.score_records(records)}
+
+
+def fit_lof(
+    records: Iterable[FeatureRecord],
+    feature_names: tuple[str, ...] = DEFAULT_ANOMALY_FEATURES,
+    scaler_name: str = "robust",
+    n_neighbors: int = 20,
+    contamination: float = 0.03,
+) -> LOFAnomalyDetector:
+    """Train a LOF detector with novelty=True for inference on new records."""
+    record_list = sorted(records, key=lambda r: r.timestamp)
+    if not record_list:
+        raise ValueError("records must not be empty")
+    training = select_likely_normal_records(record_list)
+    imputation = _build_imputation_values(training, feature_names)
+    matrix = _build_feature_matrix(training, feature_names, imputation)
+    scaler = _build_scaler(scaler_name)
+    scaled = scaler.fit_transform(matrix)
+    estimator = LocalOutlierFactor(n_neighbors=n_neighbors, contamination=contamination, novelty=True)
+    estimator.fit(scaled)
+    return LOFAnomalyDetector(
+        feature_names=feature_names,
+        imputation_values=imputation,
+        scaler=scaler,
+        estimator=estimator,
+    )
+
+
+@dataclass(slots=True)
+class OneClassSVMAnomalyDetector:
+    """One-Class SVM detector.
+
+    Best when the "normal" region is well-defined and tightly clustered.
+    Uses an RBF kernel by default. Slower than IF/LOF for large datasets.
+    """
+    feature_names: tuple[str, ...]
+    imputation_values: dict[str, float]
+    scaler: StandardScaler | RobustScaler
+    estimator: OneClassSVM
+
+    def score_records(self, records: Iterable[FeatureRecord]) -> list[AnomalyScore]:
+        ordered_records = sorted(records, key=lambda r: (r.timestamp, r.ip))
+        if not ordered_records:
+            return []
+        matrix = _build_feature_matrix(ordered_records, self.feature_names, self.imputation_values)
+        scaled = self.scaler.transform(matrix)
+        # score_samples: positive = normal, negative = anomalous
+        raw_scores = -self.estimator.score_samples(scaled)
+        norm_min, norm_max = float(np.min(raw_scores)), float(np.max(raw_scores))
+        normalized = np.clip((raw_scores - norm_min) / max(1e-6, norm_max - norm_min), 0.0, 1.0)
+        smoothed = _smooth_scores(ordered_records, normalized, alpha=0.35, window_seconds=60)
+        return [
+            AnomalyScore(
+                ip=r.ip,
+                timestamp=r.timestamp,
+                raw_model_score=round(float(raw), 6),
+                anomaly_score=round(float(norm), 4),
+                smoothed_score=round(float(sm), 4),
+            )
+            for r, raw, norm, sm in zip(ordered_records, raw_scores, normalized, smoothed)
+        ]
+
+    def score_lookup(self, records: Iterable[FeatureRecord]) -> dict[tuple[str, object], AnomalyScore]:
+        return {(s.ip, s.timestamp): s for s in self.score_records(records)}
+
+
+def fit_one_class_svm(
+    records: Iterable[FeatureRecord],
+    feature_names: tuple[str, ...] = DEFAULT_ANOMALY_FEATURES,
+    scaler_name: str = "robust",
+    nu: float = 0.05,
+    kernel: str = "rbf",
+    gamma: str = "scale",
+) -> OneClassSVMAnomalyDetector:
+    """Train a One-Class SVM detector."""
+    record_list = sorted(records, key=lambda r: r.timestamp)
+    if not record_list:
+        raise ValueError("records must not be empty")
+    training = select_likely_normal_records(record_list)
+    imputation = _build_imputation_values(training, feature_names)
+    matrix = _build_feature_matrix(training, feature_names, imputation)
+    scaler = _build_scaler(scaler_name)
+    scaled = scaler.fit_transform(matrix)
+    estimator = OneClassSVM(nu=nu, kernel=kernel, gamma=gamma)
+    estimator.fit(scaled)
+    return OneClassSVMAnomalyDetector(
+        feature_names=feature_names,
+        imputation_values=imputation,
+        scaler=scaler,
+        estimator=estimator,
+    )
+
