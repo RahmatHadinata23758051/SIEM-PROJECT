@@ -25,6 +25,12 @@ from hybrid_siem.features import build_feature_records
 from hybrid_siem.models import FeatureRecord, SshAuthEvent
 from hybrid_siem.parsers import parse_auth_log_file
 from hybrid_siem.pipeline import PipelineDecision, process_feature_records
+from hybrid_siem.response import (
+    ActionExecutionQueue,
+    ActionRequest,
+    CloudflareWAFProvider,
+    OSFirewallProvider,
+)
 from hybrid_siem.risk import RiskWeights
 from hybrid_siem.watchlist import WatchlistManager
 
@@ -151,6 +157,7 @@ stream_watchlist = WatchlistManager()
 correlation_engine = CorrelationEngine()
 alert_manager = AlertManager()
 circuit_breaker = CircuitBreaker()
+action_queue = ActionExecutionQueue()
 backend_started_at = utc_now()
 
 # Async backpressure queue — event batches enqueued here before broadcast
@@ -527,6 +534,15 @@ async def event_producer():
                     reasons=d.reasons,
                     timestamp=d.feature_record.timestamp,
                 )
+                
+                # Enqueue active responses if risk action is block
+                if d.action == "block":
+                    reason_text = "; ".join(d.reasons[:3]) if d.reasons else "Automatic high-risk block"
+                    action_queue.enqueue(ActionRequest(
+                        ip=d.feature_record.ip,
+                        action_type="block",
+                        reason=reason_text,
+                    ))
 
             batch = {
                 "type": "events_batch",
@@ -586,6 +602,11 @@ async def startup_event():
     except Exception as exc:
         print(f"[WARN] Database init failed: {exc}")
 
+    # Start SOAR queue
+    action_queue.register_provider(OSFirewallProvider(dry_run=True))
+    action_queue.register_provider(CloudflareWAFProvider(dry_run=True))
+    action_queue.start()
+
     load_real_data()
     asyncio.create_task(event_producer())
     asyncio.create_task(event_consumer())
@@ -627,6 +648,14 @@ async def block_ip(request: BlockIPRequest):
         source=request.source,
         created_at=utc_now(),
     )
+    
+    # Enqueue active block response
+    action_queue.enqueue(ActionRequest(
+        ip=request.ip,
+        action_type="block",
+        reason=request.reason or "Manual block from dashboard",
+    ))
+    
     return {
         "ok": True,
         "ip": request.ip,
@@ -879,6 +908,15 @@ async def resolve_alert(req: AlertActionRequest):
     if alert is None:
         raise HTTPException(status_code=404, detail="Alert not found")
     return alert.to_dict()
+
+
+@app.get("/api/system/actions")
+async def get_system_actions(limit: int = 20):
+    """Return recent SOAR action execution history."""
+    return {
+        "queue_size": action_queue.queue.qsize(),
+        "history": action_queue.get_recent_history(limit=limit),
+    }
 
 
 @app.get("/api/system/health")
