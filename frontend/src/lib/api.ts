@@ -152,6 +152,77 @@ function timeLabel(): string {
   return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}.${String(d.getMilliseconds()).slice(0,2)}`;
 }
 
+// ─── Data Normalization (CRITICAL) ────────────────────────────────────────────
+
+/**
+ * Normalize and validate a SIEMEvent from backend.
+ * Ensures all values are within expected bounds.
+ */
+export function normalizeSIEMEvent(event: any): SIEMEvent {
+  // Clamp risk_score to 0-100
+  const risk_score = Math.max(0, Math.min(100, parseFloat(event.risk_score) || 0));
+  
+  // Clamp anomaly_score to 0-1
+  const anomaly_score = Math.max(0, Math.min(1, parseFloat(event.anomaly_score) || 0));
+  const raw_anomaly_score = Math.max(0, Math.min(1, parseFloat(event.raw_anomaly_score) || anomaly_score));
+  
+  // Validate enum values
+  const validRiskLevels: RiskLevel[] = ['normal', 'low', 'medium', 'high'];
+  const risk_level: RiskLevel = validRiskLevels.includes(event.risk_level) ? event.risk_level : riskLevelFromScore(risk_score);
+  
+  const validActions: Action[] = ['monitor', 'rate_limit', 'block'];
+  const action: Action = validActions.includes(event.action) ? event.action : actionFromLevel(risk_level);
+  
+  const validScoringMethods: ScoringMethod[] = ['linear', 'adaptive', 'boosted', 'sigmoid'];
+  const scoring_method: ScoringMethod = validScoringMethods.includes(event.scoring_method) ? event.scoring_method : 'linear';
+  
+  // Clamp feature values
+  const failed_count = Math.max(0, Math.floor(event.failed_count) || 0);
+  const request_rate = Math.max(0, parseFloat(event.request_rate) || 0);
+  const username_variance = Math.max(0, Math.floor(event.username_variance) || 0);
+  const failed_ratio = Math.max(0, Math.min(1, parseFloat(event.failed_ratio) || 0));
+  const event_count = Math.max(0, Math.floor(event.event_count) || 0);
+  const strike_count = Math.max(0, Math.floor(event.strike_count) || 0);
+  const repeat_incidents = Math.max(0, Math.floor(event.repeat_incidents) || 0);
+  const adaptive_sensitivity = Math.max(1, Math.min(3, parseFloat(event.adaptive_sensitivity) || 1));
+  
+  // Ensure ID and timestamp exist
+  const id = event.id || `evt-${Date.now()}-${Math.random()}`;
+  const timestamp = event.timestamp || new Date().toISOString();
+  const ip = event.ip || '0.0.0.0';
+  
+  // Parse reasons (ensure array)
+  const reasons = Array.isArray(event.reasons) ? event.reasons.filter(r => typeof r === 'string').slice(0, 10) : [];
+  const temporal_insight = (typeof event.temporal_insight === 'string') ? event.temporal_insight : '';
+  
+  // Rule score (0-100)
+  const rule_score = Math.max(0, Math.min(100, parseFloat(event.rule_score) || 0));
+  
+  return {
+    id,
+    timestamp,
+    ip,
+    rule_score,
+    anomaly_score,
+    raw_anomaly_score,
+    risk_score,
+    risk_level,
+    action,
+    reasons,
+    scoring_method,
+    temporal_insight,
+    failed_count,
+    request_rate,
+    username_variance,
+    failed_ratio,
+    event_count,
+    total_attempts: event.total_attempts ? Math.max(0, Math.floor(event.total_attempts)) : undefined,
+    strike_count,
+    repeat_incidents,
+    adaptive_sensitivity,
+  };
+}
+
 // ─── Public Generators ────────────────────────────────────────────────────────
 
 /** Generate a single realistic SIEM event (mirrors pipeline output). */
@@ -323,20 +394,24 @@ export async function fetchHuntingResultsAsync(): Promise<HuntingResult[]> {
     const res = await fetch(`${API_BASE_URL}/api/hunting-results`);
     if (!res.ok) throw new Error(`API ${res.status}`);
     const events = await res.json();
-    return events.map((e: any) => ({
-      ip: e.ip,
-      rule_score: e.rule_score,
-      anomaly_score: e.anomaly_score,
-      risk_score: e.risk_score,
-      risk_level: e.risk_level,
-      action: e.action,
-      strike_count: e.strike_count,
-      scoring_method: e.scoring_method,
-      reasons: e.reasons,
-      temporal_insight: e.temporal_insight,
-      first_seen: e.first_seen || e.timestamp,
-      last_seen: e.last_seen || e.timestamp,
-    }));
+    return events.map((e: any) => {
+      // Normalize the event first
+      const normalized = normalizeSIEMEvent(e);
+      return {
+        ip: normalized.ip,
+        rule_score: normalized.rule_score,
+        anomaly_score: normalized.anomaly_score,
+        risk_score: normalized.risk_score,
+        risk_level: normalized.risk_level,
+        action: normalized.action,
+        strike_count: normalized.strike_count,
+        scoring_method: normalized.scoring_method,
+        reasons: normalized.reasons,
+        temporal_insight: normalized.temporal_insight,
+        first_seen: e.first_seen || normalized.timestamp,
+        last_seen: e.last_seen || normalized.timestamp,
+      };
+    });
   } catch (err) {
     console.warn('[API] Hunting results fetch failed, using fallback:', err);
     return getHuntingResults(15);
@@ -453,7 +528,9 @@ export class SIEMStreamManager {
       try {
         const message = JSON.parse(event.data);
         if (message.data && Array.isArray(message.data)) {
-          this.notifyEvents(message.data);
+          // Normalize all events before notifying
+          const normalized = message.data.map((e: any) => normalizeSIEMEvent(e));
+          this.notifyEvents(normalized);
         }
       } catch (error) {
         console.error('[Stream] Failed to parse message:', error);

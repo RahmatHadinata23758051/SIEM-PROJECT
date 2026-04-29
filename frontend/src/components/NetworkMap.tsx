@@ -17,8 +17,45 @@ interface NetworkMapProps {
 export default function NetworkMap({ onNavigate }: NetworkMapProps) {
   const { events, setSearchQuery } = useSIEMStream();
 
-  // Derive network nodes from latest events + static layout
-  const nodes = useMemo(() => getNetworkNodes(5), []);
+  // Derive network nodes from real events: aggregate by IP
+  const nodes = useMemo(() => {
+    if (!events || events.length === 0) {
+      return getNetworkNodes(5); // Fallback to mock if no events
+    }
+    
+    // Aggregate events by IP
+    const ipMap = new Map<string, { count: number; riskScores: number[]; action: string; level: string }>();
+    
+    events.forEach(event => {
+      if (!ipMap.has(event.ip)) {
+        ipMap.set(event.ip, { count: 0, riskScores: [], action: event.action, level: event.risk_level });
+      }
+      const data = ipMap.get(event.ip)!;
+      data.count++;
+      data.riskScores.push(event.risk_score);
+      // Use highest risk level
+      if (event.risk_level === 'high' || (event.risk_level === 'medium' && data.level !== 'high')) {
+        data.level = event.risk_level;
+      }
+      if (event.action === 'block' || (event.action === 'rate_limit' && data.action !== 'block')) {
+        data.action = event.action;
+      }
+    });
+    
+    // Convert to NetworkNode format
+    const nodeList: NetworkNode[] = Array.from(ipMap.entries()).map(([ip, data], idx) => ({
+      id: `node-${idx}`,
+      ip,
+      risk_level: data.level as 'normal' | 'low' | 'medium' | 'high',
+      risk_score: Math.round(data.riskScores.reduce((a, b) => a + b, 0) / data.riskScores.length),
+      action: data.action as 'monitor' | 'rate_limit' | 'block',
+      event_count: data.count,
+      label: ip,
+      country: undefined,
+    }));
+    
+    return nodeList;
+  }, [events]);
 
   // Volume data from telemetry
   const volumeData = useMemo(() => {
@@ -31,6 +68,7 @@ export default function NetworkMap({ onNavigate }: NetworkMapProps) {
 
   // Pick the highest-risk recent event for AI insight panel
   const topEvent = useMemo(() => {
+    if (!events || events.length === 0) return undefined;
     return [...events].sort((a, b) => b.risk_score - a.risk_score)[0];
   }, [events]);
 

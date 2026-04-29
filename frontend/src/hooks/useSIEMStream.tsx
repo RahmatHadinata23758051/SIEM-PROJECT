@@ -109,8 +109,21 @@ export function SIEMProvider({
     // Subscribe to events
     const unsubscribeEvents = stream.onEvents((newEvents) => {
       setEvents((prev) => {
-        const combined = [...newEvents, ...prev];
-        return combined.slice(0, maxEvents);
+        // Create a set of existing event IDs for deduplication
+        const existingIds = new Set(prev.map(e => e.id));
+        
+        // Filter out duplicates from new events
+        const uniqueNewEvents = newEvents.filter(e => !existingIds.has(e.id));
+        
+        // Combine and limit to maxEvents
+        const combined = [...uniqueNewEvents, ...prev];
+        const limited = combined.slice(0, maxEvents);
+        
+        if (limited.length < combined.length) {
+          console.log(`[Stream] Buffer capped at ${maxEvents} events (dropped ${combined.length - limited.length})`);
+        }
+        
+        return limited;
       });
 
       refresh(); // Refresh metrics on new events

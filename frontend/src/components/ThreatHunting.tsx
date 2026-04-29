@@ -17,10 +17,30 @@ import { getHuntingResults, type HuntingResult } from '../lib/api';
 export default function ThreatHunting() {
   const { events, telemetry } = useSIEMStream();
 
-  // Pick highest-risk IP from live events as the "active incident"
+  // Pick highest-risk event from live events as the "active incident"
   const target: HuntingResult | null = useMemo(() => {
-    const results = getHuntingResults(1);
-    return results[0] ?? null;
+    if (!events || events.length === 0) {
+      return getHuntingResults(1)[0] ?? null; // Fallback to mock if no events
+    }
+    
+    // Find highest-risk event and convert to HuntingResult
+    const topEvent = [...events].sort((a, b) => b.risk_score - a.risk_score)[0];
+    if (!topEvent) return null;
+    
+    return {
+      ip: topEvent.ip,
+      rule_score: topEvent.rule_score,
+      anomaly_score: topEvent.anomaly_score,
+      risk_score: topEvent.risk_score,
+      risk_level: topEvent.risk_level,
+      action: topEvent.action,
+      strike_count: topEvent.strike_count,
+      scoring_method: topEvent.scoring_method,
+      reasons: topEvent.reasons,
+      temporal_insight: topEvent.temporal_insight,
+      first_seen: topEvent.timestamp,
+      last_seen: topEvent.timestamp,
+    };
   }, [events]);
 
   // Build trend data from live telemetry

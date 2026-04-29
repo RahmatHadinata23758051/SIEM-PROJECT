@@ -59,6 +59,42 @@ export default function App() {
 
   return (
     <div className="flex h-screen bg-background text-on-surface overflow-hidden relative">
+      {/* Connection Status Toast */}
+      <AnimatePresence>
+        {connectionStatus === 'ERROR' && (
+          <motion.div
+            initial={{ opacity: 0, y: 50, scale: 0.9 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 20, scale: 0.9 }}
+            className="absolute top-6 right-6 z-[60] bg-surface-container-high border border-error/40 shadow-[0_8px_30px_rgb(0,0,0,0.5)] rounded-xl p-4 min-w-[300px] flex gap-3"
+          >
+            <div className="w-10 h-10 rounded-full bg-error/20 flex items-center justify-center shrink-0 animate-pulse">
+              <ShieldAlert className="text-error" size={20} />
+            </div>
+            <div className="flex-1">
+              <h4 className="text-sm font-bold text-on-surface">Connection Lost</h4>
+              <p className="text-xs text-on-surface-variant mt-1">Backend unreachable. Retrying in 3s...</p>
+            </div>
+          </motion.div>
+        )}
+        {connectionStatus === 'CONNECTING' && (
+          <motion.div
+            initial={{ opacity: 0, y: 50, scale: 0.9 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 20, scale: 0.9 }}
+            className="absolute top-6 right-6 z-[60] bg-surface-container-high border border-tertiary/40 shadow-[0_8px_30px_rgb(0,0,0,0.5)] rounded-xl p-4 min-w-[300px] flex gap-3"
+          >
+            <div className="w-10 h-10 rounded-full bg-tertiary/20 flex items-center justify-center shrink-0 animate-spin">
+              <Activity className="text-tertiary" size={20} />
+            </div>
+            <div className="flex-1">
+              <h4 className="text-sm font-bold text-on-surface">Connecting...</h4>
+              <p className="text-xs text-on-surface-variant mt-1">Establishing real-time connection.</p>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Toast Notification */}
       <AnimatePresence>
         {showToast && (
