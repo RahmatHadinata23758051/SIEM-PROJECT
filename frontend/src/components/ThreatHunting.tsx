@@ -245,7 +245,9 @@ export default function ThreatHunting() {
           </h3>
           <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
             {factors.map((factor) => (
-              <FactorCard key={factor.title} {...factor} />
+              <React.Fragment key={factor.title}>
+                <FactorCard {...factor} />
+              </React.Fragment>
             ))}
           </div>
         </div>

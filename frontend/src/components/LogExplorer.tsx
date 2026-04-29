@@ -252,7 +252,9 @@ export default function LogExplorer() {
                           <DetailItem label="request_rate" value={log.details.requestRate} variant="tertiary" />
                           <DetailItem label="user_variance" value={log.details.variance} />
                           {log.details.reasons.map((reason, index) => (
-                            <DetailItem key={index} label={`reason[${index}]`} value={reason} />
+                            <React.Fragment key={index}>
+                              <DetailItem label={`reason[${index}]`} value={reason} />
+                            </React.Fragment>
                           ))}
                         </div>
                       </div>

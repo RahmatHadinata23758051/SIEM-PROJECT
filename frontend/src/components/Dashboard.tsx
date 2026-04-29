@@ -126,14 +126,15 @@ export default function Dashboard() {
             {events.map((event) => {
               const line = formatLogLine(event);
               return (
-                <LogEntry
-                  key={event.id}
-                  time={line.time}
-                  level={line.level}
-                  message={line.message}
-                  color={line.level === 'WARN' ? 'text-tertiary' : 'text-on-surface-variant'}
-                  isCritical={line.level === 'CRIT'}
-                />
+                <React.Fragment key={event.id}>
+                  <LogEntry
+                    time={line.time}
+                    level={line.level}
+                    message={line.message}
+                    color={line.level === 'WARN' ? 'text-tertiary' : 'text-on-surface-variant'}
+                    isCritical={line.level === 'CRIT'}
+                  />
+                </React.Fragment>
               );
             })}
           </div>

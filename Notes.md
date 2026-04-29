@@ -7,7 +7,54 @@
 
 ## Backlog
 
-# Phase 5: Integration Hardening & Validation Backlog (IN PROGRESS)
+## Phase 5 Status Update (2026-04-29)
+
+### Current State
+- End-to-end frontend data flow sekarang memakai backend real untuk `Dashboard`, `LogExplorer`, `NetworkMap`, `ThreatHunting`, `AIInsights`, dan `Reports`.
+- Bootstrap mock event/telemetry di mode real sudah dihapus.
+- Buffer stream frontend sekarang `100` event dengan merge-by-id yang replace payload lama, bukan drop buta.
+- `SIEMEvent`/`PipelineDecision` contract dinormalisasi ketat di `frontend/src/lib/api.ts`.
+- Manual action sekarang benar-benar write ke backend:
+  - `POST /api/actions/block-ip`
+  - `POST /api/actions/enforce-policy`
+- Endpoint investigasi/debug/report baru sudah tersedia:
+  - `GET /api/ip/{ip}/history`
+  - `GET /api/ip/{ip}/timeline`
+  - `GET /api/telemetry`
+  - `GET /api/debug`
+  - `GET /api/reports`
+  - `GET /api/reports/{id}.json`
+  - `GET /api/reports/{id}.pdf`
+
+### Completed In Latest Hardening Pass
+- `AIInsights` tidak lagi pakai `getHuntingResults()` mock saat mode real aktif.
+- `Reports` tidak lagi pakai `Math.random()` untuk daftar report atau export JSON dummy.
+- `ThreatHunting` factor cards sekarang pakai field real: `failed_count`, `request_rate`, `username_variance`, `anomaly_score`.
+- `NetworkMap` dibersihkan dari tombol kontrol palsu; aksi utamanya sekarang fokus ke investigasi IP nyata.
+- Tombol yang sebelumnya dummy sekarang sudah wired:
+  - `Block IP`
+  - `Enforce Policy`
+  - `View History`
+  - `View Timeline`
+  - `Investigate Chain`
+  - `Documentation`
+  - `Support`
+- File deprecated `frontend/src/hooks/useSIEMStream.ts` sudah dihapus.
+
+### Remaining Production Backlog
+- Virtualisasi `LogExplorer` untuk list panjang `>30` event.
+- Persist manual policy override ke storage nyata; saat ini masih in-memory backend.
+- Pindahkan `SECRET_KEY` login dan config penting ke environment variable.
+- Tambahkan auth/authorization check pada endpoint `actions`, `reports`, dan `debug`.
+- Jalankan soak test manual `>=5 menit` dan restart backend di tengah stream untuk validasi reconnect browser.
+- Pertimbangkan code-splitting frontend; build produksi masih memberi warning bundle utama sekitar `881 kB`.
+
+### Verification Snapshot
+- `python -m unittest discover -s tests -v` â€” `30/30` lulus.
+- `npm run lint` â€” lulus.
+- `npm run build` â€” lulus, dengan warning chunk size besar pada bundle frontend.
+
+# Phase 5: Integration Hardening & Validation Backlog (ARCHIVED SNAPSHOT)
 1. **End-to-End Data Validation**
   - Pastikan semua komponen frontend (Dashboard, LogExplorer, NetworkMap, ThreatHunting) menerima data REAL dari backend (bukan mock).
   - Validasi schema JSON backend ↔ frontend (SIEMEvent/PipelineDecision contract).
