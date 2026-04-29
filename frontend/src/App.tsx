@@ -29,11 +29,12 @@ import ThreatHunting from './components/ThreatHunting';
 import NetworkMap from './components/NetworkMap';
 import AIInsights from './components/AIInsights';
 import Reports from './components/Reports';
+import Alerts from './components/Alerts';
 import Login from './components/Login';
 import { useSIEMStream } from './hooks/useSIEMStream';
 import { API_BASE_URL, fetchIpHistoryAsync, fetchIpTimelineAsync, type SIEMEvent, type TimelinePoint } from './lib/api';
 
-type View = 'dashboard' | 'threat-hunting' | 'log-explorer' | 'ai-insights' | 'network-map' | 'reports';
+type View = 'dashboard' | 'threat-hunting' | 'log-explorer' | 'ai-insights' | 'network-map' | 'reports' | 'alerts';
 
 export default function App() {
   const [token, setToken] = useState<string | null>(localStorage.getItem('siem_token'));
@@ -353,6 +354,7 @@ export default function App() {
           <NavItem icon={<Database size={20} />} label="Log Explorer" active={activeView === 'log-explorer'} onClick={() => setActiveView('log-explorer')} />
           <NavItem icon={<BrainCircuit size={20} />} label="AI Insights" active={activeView === 'ai-insights'} onClick={() => setActiveView('ai-insights')} />
           <NavItem icon={<Network size={20} />} label="Network Map" active={activeView === 'network-map'} onClick={() => setActiveView('network-map')} />
+          <NavItem icon={<ShieldAlert size={20} />} label="Alerts" active={activeView === 'alerts'} onClick={() => setActiveView('alerts')} />
           <NavItem icon={<FileText size={20} />} label="Reports" active={activeView === 'reports'} onClick={() => setActiveView('reports')} />
         </nav>
 
@@ -444,6 +446,7 @@ export default function App() {
               {activeView === 'log-explorer' && <LogExplorer />}
               {activeView === 'threat-hunting' && <ThreatHunting />}
               {activeView === 'network-map' && <NetworkMap onNavigate={setActiveView} />}
+              {activeView === 'alerts' && <Alerts />}
               {activeView === 'ai-insights' && <AIInsights />}
               {activeView === 'reports' && <Reports />}
             </motion.div>

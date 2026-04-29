@@ -37,11 +37,11 @@ export default function NetworkMap({ onNavigate }: NetworkMapProps) {
       return fallbackNodes;
     }
 
-    const ipMap = new Map<string, { count: number; riskScores: number[]; action: string; level: string }>();
+    const ipMap = new Map<string, { count: number; riskScores: number[]; action: string; level: string; isMultiVector: boolean }>();
 
     for (const event of events) {
       if (!ipMap.has(event.ip)) {
-        ipMap.set(event.ip, { count: 0, riskScores: [], action: event.action, level: event.risk_level });
+        ipMap.set(event.ip, { count: 0, riskScores: [], action: event.action, level: event.risk_level, isMultiVector: false });
       }
       const data = ipMap.get(event.ip)!;
       data.count += 1;
@@ -51,6 +51,9 @@ export default function NetworkMap({ onNavigate }: NetworkMapProps) {
       }
       if (event.action === 'block' || (event.action === 'rate_limit' && data.action !== 'block')) {
         data.action = event.action;
+      }
+      if (event.reasons.some(r => r.includes('Cross-source') || r.includes('Multi-vector'))) {
+        data.isMultiVector = true;
       }
     }
 
@@ -64,6 +67,7 @@ export default function NetworkMap({ onNavigate }: NetworkMapProps) {
         event_count: data.count,
         label: ip,
         country: 'UNK',
+        isMultiVector: data.isMultiVector,
       }))
       .sort((left, right) => right.risk_score - left.risk_score);
   }, [events, fallbackNodes]);
@@ -136,6 +140,7 @@ export default function NetworkMap({ onNavigate }: NetworkMapProps) {
             label={nodes[1]?.label ?? 'No data'}
             status={nodes[1]?.risk_level === 'high' ? 'danger' : undefined}
             isPulse={nodes[1]?.risk_level === 'high'}
+            isMultiVector={nodes[1]?.isMultiVector}
             onClick={() => {
               if (nodes[1]?.ip) {
                 setSearchQuery(nodes[1].ip);
@@ -149,6 +154,7 @@ export default function NetworkMap({ onNavigate }: NetworkMapProps) {
             icon={<Database size={20} />}
             label={nodes[2]?.label ?? 'No data'}
             status={nodes[2]?.risk_level === 'high' || nodes[2]?.risk_level === 'medium' ? 'danger' : undefined}
+            isMultiVector={nodes[2]?.isMultiVector}
             onClick={() => {
               if (nodes[2]?.ip) {
                 setSearchQuery(nodes[2].ip);
@@ -190,6 +196,10 @@ export default function NetworkMap({ onNavigate }: NetworkMapProps) {
             <div className="flex items-center gap-3 text-[10px] font-bold text-on-surface-variant uppercase tracking-widest">
               <div className="w-2.5 h-2.5 rounded-full border border-outline-variant" />
               Investigating
+            </div>
+            <div className="flex items-center gap-3 text-[10px] font-bold text-on-surface-variant uppercase tracking-widest">
+              <div className="flex -space-x-1"><div className="w-2.5 h-2.5 rounded-full border border-outline-variant bg-tertiary shadow-[0_0_8px_#ffb4ab]" /><div className="w-2.5 h-2.5 rounded-full border border-outline-variant bg-primary shadow-[0_0_8px_#ffb4ab]" /></div>
+              Multi-Vector Attack
             </div>
             <div className="flex items-center gap-3 text-[10px] font-bold text-on-surface-variant uppercase tracking-widest">
               <div className="w-4 h-0.5 bg-error" />
@@ -270,6 +280,7 @@ function MapNode({
   label,
   status,
   isPulse,
+  isMultiVector,
   onClick,
 }: {
   x: string;
@@ -278,6 +289,7 @@ function MapNode({
   label: string;
   status?: 'danger' | 'success';
   isPulse?: boolean;
+  isMultiVector?: boolean;
   onClick?: () => void;
 }) {
   return (
@@ -298,6 +310,12 @@ function MapNode({
       >
         {isPulse && <span className="absolute inset-0 rounded-full bg-error animate-ping opacity-20" />}
         {icon}
+        {isMultiVector && (
+          <div className="absolute -top-1 -right-1 flex -space-x-1.5" title="Multi-Vector Attack">
+            <div className="w-3 h-3 rounded-full border border-[#14191F] bg-tertiary shadow-[0_0_4px_#ffb4ab] z-20" />
+            <div className="w-3 h-3 rounded-full border border-[#14191F] bg-primary shadow-[0_0_4px_#ffb4ab] z-10" />
+          </div>
+        )}
       </div>
       <div className="mt-3 px-2 py-1 bg-surface-container-lowest/80 backdrop-blur-md border border-outline-variant/30 rounded text-[10px] font-mono whitespace-nowrap shadow-lg">
         {label}

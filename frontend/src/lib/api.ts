@@ -9,9 +9,22 @@ export const USE_REAL_API = true;
 export const API_BASE_URL = 'http://127.0.0.1:8001';
 
 export type RiskLevel = 'normal' | 'low' | 'medium' | 'high';
-export type Action = 'monitor' | 'rate_limit' | 'block';
+export type Action = 'monitor' | 'rate_limit' | 'block' | 'escalate_manual_review';
 export type ScoringMethod = 'linear' | 'adaptive' | 'boosted' | 'sigmoid';
 export type LogSeverity = 'INFO' | 'WARN' | 'CRIT' | 'DEBUG';
+
+export interface Alert {
+  id: string;
+  ip: string;
+  severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+  state: 'TRIGGERED' | 'ACKNOWLEDGED' | 'RESOLVED';
+  triggered_at: string;
+  acknowledged_at: string | null;
+  resolved_at: string | null;
+  events_correlated: number;
+  description: string;
+  updated_at: string;
+}
 
 export interface ManualOverride {
   action: Action;
@@ -807,4 +820,42 @@ export class SIEMStreamManager {
 
 export function createStreamManager(): SIEMStreamManager {
   return new SIEMStreamManager(USE_REAL_API);
+}
+
+export async function fetchAllAlertsAsync(limit: number = 100): Promise<Alert[]> {
+  try {
+    const payload = await fetchJson<any[]>(`/api/alerts/all?limit=${limit}`);
+    return Array.isArray(payload) ? payload : [];
+  } catch (error) {
+    console.warn('[API] Fetch alerts failed:', error);
+    return [];
+  }
+}
+
+export async function acknowledgeAlertAsync(alertId: string): Promise<Alert | null> {
+  try {
+    const payload = await fetchJson<Alert>('/api/alerts/acknowledge', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ alert_id: alertId }),
+    });
+    return payload;
+  } catch (error) {
+    console.warn('[API] Acknowledge alert failed:', error);
+    return null;
+  }
+}
+
+export async function resolveAlertAsync(alertId: string): Promise<Alert | null> {
+  try {
+    const payload = await fetchJson<Alert>('/api/alerts/resolve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ alert_id: alertId }),
+    });
+    return payload;
+  } catch (error) {
+    console.warn('[API] Resolve alert failed:', error);
+    return null;
+  }
 }

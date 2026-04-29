@@ -21,6 +21,19 @@ import { useSIEMStream } from '../hooks/useSIEMStream';
 export default function ThreatHunting() {
   const { events, telemetry, setSelectedIp, enforcePolicy } = useSIEMStream();
   const [fallbackTarget, setFallbackTarget] = useState<HuntingResult | null>(null);
+  const [activeTab, setActiveTab] = useState<'active' | 'review_queue'>('active');
+
+  const manualReviewQueue = useMemo(() => {
+    // Collect all unique IPs that need manual review
+    const reviewEvents = events.filter((e) => e.action === 'escalate_manual_review');
+    const uniqueIps = new Map<string, typeof reviewEvents[0]>();
+    for (const e of reviewEvents) {
+      if (!uniqueIps.has(e.ip) || e.risk_score > uniqueIps.get(e.ip)!.risk_score) {
+        uniqueIps.set(e.ip, e);
+      }
+    }
+    return Array.from(uniqueIps.values()).sort((a, b) => b.risk_score - a.risk_score);
+  }, [events]);
 
   useEffect(() => {
     if (events.length > 0) return;
@@ -144,25 +157,88 @@ export default function ThreatHunting() {
             </div>
           </div>
         </div>
-        <div className="flex gap-2">
+        
+        <div className="flex bg-surface-container-high p-1 rounded-lg">
           <button
-            onClick={() => setSelectedIp(target.ip)}
-            className="bg-surface-container border border-outline-variant/30 hover:bg-surface-container-high text-on-surface px-4 py-2 rounded-lg font-semibold text-xs flex items-center gap-2 transition-all"
+            onClick={() => setActiveTab('active')}
+            className={cn('px-4 py-1.5 rounded-md text-xs font-bold transition-all', activeTab === 'active' ? 'bg-surface-container text-on-surface shadow-sm' : 'text-on-surface-variant hover:text-on-surface')}
           >
-            <History size={16} />
-            View History
+            Active Incident
           </button>
           <button
-            onClick={() => void enforcePolicy(target.ip, target.risk_score >= 85 ? 'block' : 'rate_limit', 'Enforced from Threat Hunting')}
-            className="bg-primary hover:bg-primary-container text-on-primary px-4 py-2 rounded-lg font-bold text-xs flex items-center gap-2 transition-all shadow-[0_0_15px_rgba(173,198,255,0.2)]"
+            onClick={() => setActiveTab('review_queue')}
+            className={cn('px-4 py-1.5 rounded-md text-xs font-bold transition-all flex items-center gap-2', activeTab === 'review_queue' ? 'bg-surface-container text-on-surface shadow-sm' : 'text-on-surface-variant hover:text-on-surface')}
           >
-            <Gavel size={16} />
-            Enforce Policy
+            Manual Review Queue
+            {manualReviewQueue.length > 0 && (
+              <span className="bg-primary/20 text-primary px-1.5 py-0.5 rounded text-[10px]">{manualReviewQueue.length}</span>
+            )}
           </button>
         </div>
       </div>
 
-      <div className="grid grid-cols-12 gap-6">
+      {activeTab === 'review_queue' ? (
+        <div className="flex flex-col gap-4">
+          <div className="bg-surface-container rounded-xl border border-outline-variant/30 p-6">
+            <div className="flex items-center gap-3 mb-6 border-b border-outline-variant/20 pb-4">
+              <div className="w-10 h-10 rounded-full bg-primary/10 flex items-center justify-center">
+                <BrainCircuit className="text-primary" size={20} />
+              </div>
+              <div>
+                <h2 className="text-sm font-bold text-on-surface uppercase tracking-widest">Manual Review Queue</h2>
+                <p className="text-xs text-on-surface-variant mt-0.5">Events flagged by AI due to low confidence or borderline risk scores.</p>
+              </div>
+            </div>
+            
+            {manualReviewQueue.length === 0 ? (
+              <div className="py-12 flex flex-col items-center justify-center text-on-surface-variant gap-3">
+                <ShieldAlert size={40} className="text-outline-variant" />
+                <p className="text-sm font-medium">Queue is clear. No events require manual review.</p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {manualReviewQueue.map((item) => (
+                  <div key={item.id} className="bg-surface-container-high border border-outline-variant/30 p-4 rounded-xl flex flex-col lg:flex-row gap-4 justify-between lg:items-center hover:border-outline-variant transition-all">
+                    <div className="flex-1 space-y-2">
+                      <div className="flex items-center gap-3">
+                        <span className="font-mono font-bold text-on-surface text-lg">{item.ip}</span>
+                        <span className="px-2 py-0.5 rounded bg-surface-container-highest text-on-surface-variant text-[10px] font-bold uppercase tracking-widest border border-outline-variant/50">
+                          AI Confidence: {Math.round(item.anomaly_score * 100)}%
+                        </span>
+                      </div>
+                      <p className="text-xs text-on-surface-variant line-clamp-2">
+                        {item.reasons.join(' · ')}
+                      </p>
+                    </div>
+                    
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        onClick={() => setSelectedIp(item.ip)}
+                        className="bg-surface-container hover:bg-surface-container-highest text-on-surface px-3 py-1.5 rounded text-xs font-bold uppercase tracking-widest transition-colors border border-outline-variant/30"
+                      >
+                        Investigate
+                      </button>
+                      <button
+                        onClick={() => void enforcePolicy(item.ip, 'monitor', 'Reviewed: Set to Monitor')}
+                        className="bg-primary/10 hover:bg-primary/20 text-primary border border-primary/30 px-3 py-1.5 rounded text-xs font-bold uppercase tracking-widest transition-colors"
+                      >
+                        Monitor
+                      </button>
+                      <button
+                        onClick={() => void enforcePolicy(item.ip, 'block', 'Reviewed: Enforced Block')}
+                        className="bg-error/10 hover:bg-error/20 text-error border border-error/30 px-3 py-1.5 rounded text-xs font-bold uppercase tracking-widest transition-colors"
+                      >
+                        Block
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      ) : (
+        <div className="grid grid-cols-12 gap-6">
         <div className="col-span-12 md:col-span-4 bg-surface-container rounded-xl border border-outline-variant/30 p-6 flex flex-col items-center justify-center relative overflow-hidden group">
           <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-error to-transparent opacity-50 transition-opacity group-hover:opacity-100" />
           <h3 className="text-sm font-bold text-on-surface-variant uppercase tracking-widest self-start w-full border-b border-outline-variant/20 pb-4 mb-6">
@@ -282,7 +358,8 @@ export default function ThreatHunting() {
             </ResponsiveContainer>
           </div>
         </div>
-      </div>
+        </div>
+      )}
     </div>
   );
 }

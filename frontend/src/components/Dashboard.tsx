@@ -125,6 +125,7 @@ export default function Dashboard() {
           >
             {events.map((event) => {
               const line = formatLogLine(event);
+              const isMultiVector = event.reasons.some(r => r.includes('Cross-source') || r.includes('Multi-vector'));
               return (
                 <React.Fragment key={event.id}>
                   <LogEntry
@@ -133,6 +134,7 @@ export default function Dashboard() {
                     message={line.message}
                     color={line.level === 'WARN' ? 'text-tertiary' : 'text-on-surface-variant'}
                     isCritical={line.level === 'CRIT'}
+                    isMultiVector={isMultiVector}
                   />
                 </React.Fragment>
               );
@@ -208,18 +210,23 @@ function LogEntry({
   message,
   color = 'text-on-surface-variant',
   isCritical,
+  isMultiVector,
 }: {
   time: string;
   level: string;
   message: string;
   color?: string;
   isCritical?: boolean;
+  isMultiVector?: boolean;
 }) {
   return (
     <div className={cn('flex gap-4 px-2 py-1.5 rounded transition-all group cursor-default', isCritical ? 'bg-error/10 border border-error/20' : 'hover:bg-surface-container-highest/50')}>
       <span className="text-on-surface-variant/40 w-20 shrink-0 select-none">{time}</span>
       <span className={cn('shrink-0 w-12 font-bold', isCritical ? 'text-error' : 'text-primary')}>[{level}]</span>
-      <span className={cn('break-all', isCritical ? 'font-medium' : color)}>{message}</span>
+      <span className={cn('break-all flex-1', isCritical ? 'font-medium' : color)}>
+        {isMultiVector && <span className="inline-block mr-2 text-[8px] bg-tertiary text-on-tertiary px-1 py-0.5 rounded font-bold uppercase tracking-widest align-middle shadow-[0_0_5px_#ffb4ab]">Multi-Vector</span>}
+        {message}
+      </span>
     </div>
   );
 }
