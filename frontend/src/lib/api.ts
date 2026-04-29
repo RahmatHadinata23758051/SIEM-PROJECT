@@ -1,63 +1,54 @@
 /**
- * src/lib/api.ts
- * ──────────────────────────────────────────────────────────────────────────────
- * Aegis AI SIEM — Central Data Layer (Dual-Mode: Real API + Mock Fallback)
+ * Central frontend data layer.
  *
- * Mode Toggle:
- *  - USE_REAL_API = true: Consume from http://localhost:8001/api/*
- *  - USE_REAL_API = false: Use mock data generators
- *
- * Rules:
- *  - ALL data must conform to SIEMEvent interface
- *  - Mirrors PipelineDecision from hybrid_siem/pipeline.py
- *  - WebSocket for streaming, REST for historical data
- * ──────────────────────────────────────────────────────────────────────────────
+ * - USE_REAL_API = true: consume FastAPI backend and never silently switch to mock data.
+ * - USE_REAL_API = false: use local mock generators for demo-only flows.
  */
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// MODE TOGGLE
-// ═══════════════════════════════════════════════════════════════════════════════
 export const USE_REAL_API = true;
-export const API_BASE_URL = "http://127.0.0.1:8001";
-
-// ─── Data Contracts ───────────────────────────────────────────────────────────
+export const API_BASE_URL = 'http://127.0.0.1:8001';
 
 export type RiskLevel = 'normal' | 'low' | 'medium' | 'high';
-export type Action    = 'monitor' | 'rate_limit' | 'block';
+export type Action = 'monitor' | 'rate_limit' | 'block';
 export type ScoringMethod = 'linear' | 'adaptive' | 'boosted' | 'sigmoid';
 export type LogSeverity = 'INFO' | 'WARN' | 'CRIT' | 'DEBUG';
 
-/** Mirrors PipelineDecision in hybrid_siem/pipeline.py */
+export interface ManualOverride {
+  action: Action;
+  reason: string;
+  source: string;
+  created_at: string;
+}
+
 export interface SIEMEvent {
   id: string;
-  timestamp: string;        // ISO-8601
+  timestamp: string;
   ip: string;
-  rule_score: number;       // 0–100
-  anomaly_score: number;    // 0.0–1.0
+  rule_score: number;
+  anomaly_score: number;
   raw_anomaly_score: number;
-  risk_score: number;       // 0–100 (watchlist current)
+  risk_score: number;
   risk_level: RiskLevel;
   action: Action;
   reasons: string[];
   scoring_method: ScoringMethod;
   temporal_insight: string;
-  // Feature record fields
   failed_count: number;
   request_rate: number;
   username_variance: number;
   failed_ratio: number;
   event_count: number;
   total_attempts?: number;
-  // Watchlist
   strike_count: number;
   repeat_incidents: number;
   adaptive_sensitivity: number;
+  manual_override?: ManualOverride | null;
 }
 
 export interface SystemMetrics {
   status: 'NOMINAL' | 'ELEVATED' | 'CRITICAL';
   events_24h: string;
-  events_trend: number;         // percentage vs yesterday
+  events_trend: number;
   active_suspicious_ips: number;
   critical_nodes_isolated: number;
   high_risk_count: number;
@@ -67,8 +58,11 @@ export interface SystemMetrics {
 
 export interface TelemetryPoint {
   time: string;
+  timestamp?: string;
   volume: number;
   risk: number;
+  event_rate_per_sec?: number;
+  active_ips?: number;
 }
 
 export interface NetworkNode {
@@ -82,53 +76,134 @@ export interface NetworkNode {
   country?: string;
 }
 
-export interface HuntingResult {
-  ip: string;
-  rule_score: number;
-  anomaly_score: number;
-  risk_score: number;
-  risk_level: RiskLevel;
-  action: Action;
-  strike_count: number;
-  scoring_method: ScoringMethod;
-  reasons: string[];
-  temporal_insight: string;
+export interface HuntingResult extends SIEMEvent {
   first_seen: string;
   last_seen: string;
 }
 
-// ─── Internal Helpers ─────────────────────────────────────────────────────────
+export interface TimelinePoint {
+  id: string;
+  timestamp: string;
+  risk_score: number;
+  rule_score: number;
+  anomaly_score: number;
+  action: Action;
+  risk_level: RiskLevel;
+  event_count: number;
+  failed_count: number;
+  request_rate: number;
+  username_variance: number;
+  failed_ratio: number;
+}
 
-let _seq = 0;
-const uid = () => `evt-${Date.now()}-${++_seq}`;
+export interface IpHistoryResponse {
+  ip: string;
+  history: SIEMEvent[];
+  manual_override?: ManualOverride | null;
+}
 
-const SUSPICIOUS_IPS = [
-  '203.0.113.45', '185.220.101.12', '45.33.32.156', '198.51.100.77',
-  '91.108.4.200',  '162.158.92.10',  '104.21.16.35',  '172.67.200.4',
-  '77.88.55.60',   '8.8.8.8', '185.15.58.22', '210.10.5.44',
-];
+export interface IpTimelineResponse {
+  ip: string;
+  timeline: TimelinePoint[];
+  manual_override?: ManualOverride | null;
+}
 
-const COUNTRIES = ['RU', 'CN', 'US', 'KR', 'DE', 'NL', 'BR', 'ID', 'IN', 'UA'];
+export interface DebugStats {
+  backend_started_at: string | null;
+  model_loaded: boolean;
+  records_loaded: number;
+  parsed_events_loaded: number;
+  unique_ips: number;
+  active_connections: number;
+  total_connections: number;
+  total_disconnects: number;
+  total_batches_sent: number;
+  total_events_sent: number;
+  broadcast_errors: number;
+  stream_position: number;
+  last_batch_at: string | null;
+  event_rate_per_sec: number;
+  latest_volume: number;
+  latest_risk: number;
+  decision_count: number;
+  manual_overrides: Record<string, ManualOverride>;
+}
 
-const REASON_POOL: Record<RiskLevel, string[]> = {
-  normal: ['No anomalies detected', 'Baseline traffic pattern'],
-  low:    ['Low rule score: 35', 'Minimal failed attempts detected'],
-  medium: [
-    'Medium rule score: 58', 'Failed attempts: 6', 'High request rate: 0.091',
-    'Anomalous pattern detected: 0.621', 'Repeat offender: 2 strikes recorded',
-  ],
-  high: [
-    'High rule score: 87', 'Failed attempts: 14', 'High request rate: 0.145',
-    'High failed ratio: 0.92', 'Anomalous pattern detected: 0.872',
-    'Non-linear boost applied (rule + anomaly agreement)',
-    'Repeat offender: 4 strikes recorded', 'BLOCKED: High risk status',
-    'Sustained activity: 11 events in window', 'Low username diversity: 1 unique users',
-  ],
+export interface ReportSummary {
+  id: string;
+  date: string;
+  label: string;
+  status: string;
+  incident_count: number;
+  high_risk_count: number;
+  medium_risk_count: number;
+  baseline_count: number;
+  unique_ip_count: number;
+  generated_at: string;
+}
+
+export interface ReportDetail extends ReportSummary {
+  unique_ips: string[];
+  top_events: SIEMEvent[];
+  manual_overrides: Record<string, ManualOverride>;
+}
+
+const EMPTY_METRICS: SystemMetrics = {
+  status: 'NOMINAL',
+  events_24h: '0',
+  events_trend: 0,
+  active_suspicious_ips: 0,
+  critical_nodes_isolated: 0,
+  high_risk_count: 0,
+  elevated_anomaly_count: 0,
+  baseline_count: 0,
 };
 
-const rand  = (min: number, max: number) => Math.random() * (max - min) + min;
+const EMPTY_DEBUG: DebugStats = {
+  backend_started_at: null,
+  model_loaded: false,
+  records_loaded: 0,
+  parsed_events_loaded: 0,
+  unique_ips: 0,
+  active_connections: 0,
+  total_connections: 0,
+  total_disconnects: 0,
+  total_batches_sent: 0,
+  total_events_sent: 0,
+  broadcast_errors: 0,
+  stream_position: 0,
+  last_batch_at: null,
+  event_rate_per_sec: 0,
+  latest_volume: 0,
+  latest_risk: 0,
+  decision_count: 0,
+  manual_overrides: {},
+};
+
+let seq = 0;
+const uid = () => `evt-${Date.now()}-${++seq}`;
+const rand = (min: number, max: number) => Math.random() * (max - min) + min;
 const randI = (min: number, max: number) => Math.floor(rand(min, max));
-const pick  = <T>(arr: T[]): T => arr[randI(0, arr.length)];
+const pick = <T>(arr: T[]): T => arr[randI(0, arr.length)];
+const isoNow = () => new Date().toISOString();
+
+const MOCK_IPS = [
+  '203.0.113.45',
+  '185.220.101.12',
+  '45.33.32.156',
+  '198.51.100.77',
+  '91.108.4.200',
+  '162.158.92.10',
+  '104.21.16.35',
+  '172.67.200.4',
+];
+
+const MOCK_REASONS: Record<RiskLevel, string[]> = {
+  normal: ['No anomalies detected', 'Baseline traffic pattern'],
+  low: ['Low rule score: 35', 'Minimal failed attempts detected'],
+  medium: ['Medium rule score: 58', 'High request rate detected', 'Adaptive weighting applied'],
+  high: ['High rule score: 87', 'Anomalous pattern detected: 0.872', 'BLOCKED: High risk status'],
+};
 
 function riskLevelFromScore(score: number): RiskLevel {
   if (score >= 85) return 'high';
@@ -138,434 +213,527 @@ function riskLevelFromScore(score: number): RiskLevel {
 }
 
 function actionFromLevel(level: RiskLevel): Action {
-  if (level === 'high')   return 'block';
+  if (level === 'high') return 'block';
   if (level === 'medium') return 'rate_limit';
   return 'monitor';
 }
 
-function isoNow(): string {
-  return new Date().toISOString();
-}
+function normalizeManualOverride(payload: any): ManualOverride | null {
+  if (!payload || typeof payload !== 'object') {
+    return null;
+  }
 
-function timeLabel(): string {
-  const d = new Date();
-  return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}.${String(d.getMilliseconds()).slice(0,2)}`;
-}
-
-// ─── Data Normalization (CRITICAL) ────────────────────────────────────────────
-
-/**
- * Normalize and validate a SIEMEvent from backend.
- * Ensures all values are within expected bounds.
- */
-export function normalizeSIEMEvent(event: any): SIEMEvent {
-  // Clamp risk_score to 0-100
-  const risk_score = Math.max(0, Math.min(100, parseFloat(event.risk_score) || 0));
-  
-  // Clamp anomaly_score to 0-1
-  const anomaly_score = Math.max(0, Math.min(1, parseFloat(event.anomaly_score) || 0));
-  const raw_anomaly_score = Math.max(0, Math.min(1, parseFloat(event.raw_anomaly_score) || anomaly_score));
-  
-  // Validate enum values
-  const validRiskLevels: RiskLevel[] = ['normal', 'low', 'medium', 'high'];
-  const risk_level: RiskLevel = validRiskLevels.includes(event.risk_level) ? event.risk_level : riskLevelFromScore(risk_score);
-  
   const validActions: Action[] = ['monitor', 'rate_limit', 'block'];
-  const action: Action = validActions.includes(event.action) ? event.action : actionFromLevel(risk_level);
-  
-  const validScoringMethods: ScoringMethod[] = ['linear', 'adaptive', 'boosted', 'sigmoid'];
-  const scoring_method: ScoringMethod = validScoringMethods.includes(event.scoring_method) ? event.scoring_method : 'linear';
-  
-  // Clamp feature values
-  const failed_count = Math.max(0, Math.floor(event.failed_count) || 0);
-  const request_rate = Math.max(0, parseFloat(event.request_rate) || 0);
-  const username_variance = Math.max(0, Math.floor(event.username_variance) || 0);
-  const failed_ratio = Math.max(0, Math.min(1, parseFloat(event.failed_ratio) || 0));
-  const event_count = Math.max(0, Math.floor(event.event_count) || 0);
-  const strike_count = Math.max(0, Math.floor(event.strike_count) || 0);
-  const repeat_incidents = Math.max(0, Math.floor(event.repeat_incidents) || 0);
-  const adaptive_sensitivity = Math.max(1, Math.min(3, parseFloat(event.adaptive_sensitivity) || 1));
-  
-  // Ensure ID and timestamp exist
-  const id = event.id || `evt-${Date.now()}-${Math.random()}`;
-  const timestamp = event.timestamp || new Date().toISOString();
-  const ip = event.ip || '0.0.0.0';
-  
-  // Parse reasons (ensure array)
-  const reasons = Array.isArray(event.reasons) ? event.reasons.filter(r => typeof r === 'string').slice(0, 10) : [];
-  const temporal_insight = (typeof event.temporal_insight === 'string') ? event.temporal_insight : '';
-  
-  // Rule score (0-100)
-  const rule_score = Math.max(0, Math.min(100, parseFloat(event.rule_score) || 0));
-  
   return {
-    id,
-    timestamp,
-    ip,
+    action: validActions.includes(payload.action) ? payload.action : 'monitor',
+    reason: typeof payload.reason === 'string' ? payload.reason : 'Manual override',
+    source: typeof payload.source === 'string' ? payload.source : 'unknown',
+    created_at: typeof payload.created_at === 'string' ? payload.created_at : new Date().toISOString(),
+  };
+}
+
+export function normalizeSIEMEvent(event: any): SIEMEvent {
+  const risk_score = Math.max(0, Math.min(100, parseFloat(event?.risk_score) || 0));
+  const anomaly_score = Math.max(0, Math.min(1, parseFloat(event?.anomaly_score) || 0));
+  const raw_anomaly_score = Math.max(0, Math.min(1, parseFloat(event?.raw_anomaly_score) || anomaly_score));
+  const rule_score = Math.max(0, Math.min(100, parseFloat(event?.rule_score) || 0));
+
+  const validRiskLevels: RiskLevel[] = ['normal', 'low', 'medium', 'high'];
+  const risk_level: RiskLevel = validRiskLevels.includes(event?.risk_level)
+    ? event.risk_level
+    : riskLevelFromScore(risk_score);
+
+  const validActions: Action[] = ['monitor', 'rate_limit', 'block'];
+  const action: Action = validActions.includes(event?.action)
+    ? event.action
+    : actionFromLevel(risk_level);
+
+  const validMethods: ScoringMethod[] = ['linear', 'adaptive', 'boosted', 'sigmoid'];
+  const scoring_method: ScoringMethod = validMethods.includes(event?.scoring_method)
+    ? event.scoring_method
+    : 'linear';
+
+  return {
+    id: typeof event?.id === 'string' ? event.id : uid(),
+    timestamp: typeof event?.timestamp === 'string' ? event.timestamp : new Date().toISOString(),
+    ip: typeof event?.ip === 'string' ? event.ip : '0.0.0.0',
     rule_score,
     anomaly_score,
     raw_anomaly_score,
     risk_score,
     risk_level,
     action,
-    reasons,
+    reasons: Array.isArray(event?.reasons) ? event.reasons.filter((item: unknown) => typeof item === 'string').slice(0, 10) : [],
     scoring_method,
-    temporal_insight,
-    failed_count,
-    request_rate,
-    username_variance,
-    failed_ratio,
-    event_count,
-    total_attempts: event.total_attempts ? Math.max(0, Math.floor(event.total_attempts)) : undefined,
-    strike_count,
-    repeat_incidents,
-    adaptive_sensitivity,
+    temporal_insight: typeof event?.temporal_insight === 'string' ? event.temporal_insight : '',
+    failed_count: Math.max(0, Math.floor(event?.failed_count) || 0),
+    request_rate: Math.max(0, parseFloat(event?.request_rate) || 0),
+    username_variance: Math.max(0, Math.floor(event?.username_variance) || 0),
+    failed_ratio: Math.max(0, Math.min(1, parseFloat(event?.failed_ratio) || 0)),
+    event_count: Math.max(0, Math.floor(event?.event_count) || 0),
+    total_attempts: event?.total_attempts === undefined ? undefined : Math.max(0, Math.floor(event.total_attempts) || 0),
+    strike_count: Math.max(0, Math.floor(event?.strike_count) || 0),
+    repeat_incidents: Math.max(0, Math.floor(event?.repeat_incidents) || 0),
+    adaptive_sensitivity: Math.max(1, Math.min(3, parseFloat(event?.adaptive_sensitivity) || 1)),
+    manual_override: normalizeManualOverride(event?.manual_override),
   };
 }
 
-// ─── Public Generators ────────────────────────────────────────────────────────
-
-/** Generate a single realistic SIEM event (mirrors pipeline output). */
 export function generateSIEMEvent(overrides?: Partial<SIEMEvent>): SIEMEvent {
-  const ruleScore    = randI(0, 100);
-  const anomalyRaw   = parseFloat(rand(0, 1).toFixed(3));
-  const anomaly      = parseFloat(Math.min(1, anomalyRaw * (0.8 + Math.random() * 0.4)).toFixed(3));
-  const riskScore    = parseFloat(rand(0, 100).toFixed(1));
-  const level        = riskLevelFromScore(riskScore);
-  const action       = actionFromLevel(level);
-  const strikeCount  = randI(0, 6);
-  const reasons      = [...REASON_POOL[level]].slice(0, randI(1, Math.min(4, REASON_POOL[level].length)));
-
+  const risk_score = parseFloat(rand(0, 100).toFixed(1));
+  const risk_level = riskLevelFromScore(risk_score);
+  const anomaly_score = parseFloat(rand(0, 1).toFixed(3));
   return {
     id: uid(),
     timestamp: isoNow(),
-    ip: pick(SUSPICIOUS_IPS),
-    rule_score: ruleScore,
-    anomaly_score: anomaly,
-    raw_anomaly_score: anomalyRaw,
-    risk_score: riskScore,
-    risk_level: level,
-    action,
-    reasons,
-    scoring_method: pick(['linear','adaptive','boosted','sigmoid'] as ScoringMethod[]),
-    temporal_insight: riskScore >= 65
-      ? pick(['High event concentration in single window', 'Patterns of recurring attacks detected', ''])
-      : '',
-    failed_count: randI(0, 20),
+    ip: pick(MOCK_IPS),
+    rule_score: randI(0, 100),
+    anomaly_score,
+    raw_anomaly_score: anomaly_score,
+    risk_score,
+    risk_level,
+    action: actionFromLevel(risk_level),
+    reasons: MOCK_REASONS[risk_level].slice(0, randI(1, MOCK_REASONS[risk_level].length + 1)),
+    scoring_method: pick(['linear', 'adaptive', 'boosted', 'sigmoid'] as ScoringMethod[]),
+    temporal_insight: risk_score > 70 ? 'High event concentration in single window' : '',
+    failed_count: randI(0, 15),
     request_rate: parseFloat(rand(0, 0.2).toFixed(3)),
     username_variance: randI(1, 8),
     failed_ratio: parseFloat(rand(0, 1).toFixed(2)),
-    event_count: randI(1, 15),
-    strike_count: strikeCount,
-    repeat_incidents: randI(0, 4),
+    event_count: randI(1, 12),
+    total_attempts: randI(1, 30),
+    strike_count: randI(0, 4),
+    repeat_incidents: randI(0, 3),
     adaptive_sensitivity: parseFloat(rand(1, 2.5).toFixed(2)),
+    manual_override: null,
     ...overrides,
   };
 }
 
-/** Generate a batch of events (for initial load). */
 export function generateEventBatch(count = 20): SIEMEvent[] {
   return Array.from({ length: count }, () => generateSIEMEvent());
 }
 
-/** Generate current system-wide metrics. */
 export function getSystemMetrics(): SystemMetrics {
-  const high      = randI(15, 45);
-  const elevated  = randI(60, 110);
-  const baseline  = randI(180, 280);
-  const total     = high + elevated + baseline;
-  const riskScore = (high / total) * 100;
-
+  const high = randI(10, 40);
+  const elevated = randI(25, 80);
+  const baseline = randI(40, 150);
+  const total = high + elevated + baseline;
   return {
-    status:                 riskScore > 10 ? (riskScore > 15 ? 'CRITICAL' : 'ELEVATED') : 'NOMINAL',
-    events_24h:             `${(randI(900, 1400) / 1000).toFixed(2)}B`,
-    events_trend:           parseFloat(rand(-5, 25).toFixed(1)),
-    active_suspicious_ips:  total,
+    status: high / total > 0.15 ? 'CRITICAL' : elevated / total > 0.10 ? 'ELEVATED' : 'NOMINAL',
+    events_24h: String(total),
+    events_trend: parseFloat(rand(-5, 10).toFixed(1)),
+    active_suspicious_ips: total,
     critical_nodes_isolated: high,
-    high_risk_count:         high,
-    elevated_anomaly_count:  elevated,
-    baseline_count:          baseline,
+    high_risk_count: high,
+    elevated_anomaly_count: elevated,
+    baseline_count: baseline,
   };
 }
 
-/** Generate telemetry chart points (last N hours). */
 export function getTelemetryHistory(hours = 12): TelemetryPoint[] {
   const now = new Date();
-  return Array.from({ length: hours }, (_, i) => {
-    const t = new Date(now.getTime() - (hours - 1 - i) * 3600_000);
-    const label = `${String(t.getHours()).padStart(2,'0')}:00`;
+  return Array.from({ length: hours }, (_, index) => {
+    const time = new Date(now.getTime() - (hours - 1 - index) * 3600_000);
     return {
-      time:   label,
-      volume: randI(1500, 6000),
-      risk:   randI(800, 9800),
+      time: `${String(time.getHours()).padStart(2, '0')}:00`,
+      timestamp: time.toISOString(),
+      volume: randI(1, 15),
+      risk: parseFloat(rand(0, 100).toFixed(2)),
+      event_rate_per_sec: parseFloat(rand(0, 0.3).toFixed(3)),
+      active_ips: randI(1, 8),
     };
   });
 }
 
-/** Generate network node data for the Network Map. */
-export function getNetworkNodes(count = 16): NetworkNode[] {
-  return Array.from({ length: count }, (_, i) => {
-    const score = parseFloat(rand(0, 100).toFixed(1));
-    const level = riskLevelFromScore(score);
-    const ip    = pick(SUSPICIOUS_IPS);
+export function getNetworkNodes(count = 8): NetworkNode[] {
+  return Array.from({ length: count }, (_, index) => {
+    const risk_score = parseFloat(rand(0, 100).toFixed(1));
+    const risk_level = riskLevelFromScore(risk_score);
     return {
-      id:          `node-${i}`,
-      ip,
-      risk_level:  level,
-      risk_score:  score,
-      action:      actionFromLevel(level),
-      event_count: randI(1, 50),
-      label:       `Node-${String(i+1).padStart(2,'0')}`,
-      country:     pick(COUNTRIES),
+      id: `node-${index}`,
+      ip: pick(MOCK_IPS),
+      risk_level,
+      risk_score,
+      action: actionFromLevel(risk_level),
+      event_count: randI(1, 20),
+      label: `Node-${String(index + 1).padStart(2, '0')}`,
+      country: 'UNK',
     };
   });
 }
 
-/** Generate hunting results for ThreatHunting view. */
 export function getHuntingResults(count = 10): HuntingResult[] {
   return Array.from({ length: count }, () => {
-    const event   = generateSIEMEvent();
-    const base    = new Date(Date.now() - randI(3600_000, 86400_000 * 3));
-    const last    = new Date(base.getTime() + randI(60_000, 3600_000));
+    const event = generateSIEMEvent();
     return {
-      ip:               event.ip,
-      rule_score:       event.rule_score,
-      anomaly_score:    event.anomaly_score,
-      risk_score:       event.risk_score,
-      risk_level:       event.risk_level,
-      action:           event.action,
-      strike_count:     event.strike_count,
-      scoring_method:   event.scoring_method,
-      reasons:          event.reasons,
-      temporal_insight: event.temporal_insight,
-      first_seen:       base.toISOString(),
-      last_seen:        last.toISOString(),
+      ...event,
+      first_seen: new Date(Date.now() - randI(3600_000, 36_000_000)).toISOString(),
+      last_seen: event.timestamp,
     };
   }).sort((a, b) => b.risk_score - a.risk_score);
 }
 
-// ─── Async Fetchers (Real API) ────────────────────────────────────────────────
+async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(`${API_BASE_URL}${path}`, init);
+  if (!response.ok) {
+    throw new Error(`API ${response.status}`);
+  }
+  return response.json() as Promise<T>;
+}
 
-/**
- * Fetch system metrics from real API.
- */
+function sanitizeTelemetryPoint(point: any): TelemetryPoint {
+  return {
+    time: typeof point?.time === 'string' ? point.time : '--:--',
+    timestamp: typeof point?.timestamp === 'string' ? point.timestamp : undefined,
+    volume: Math.max(0, Math.floor(point?.volume) || 0),
+    risk: Math.max(0, Math.min(100, parseFloat(point?.risk) || 0)),
+    event_rate_per_sec: Math.max(0, parseFloat(point?.event_rate_per_sec) || 0),
+    active_ips: Math.max(0, Math.floor(point?.active_ips) || 0),
+  };
+}
+
+function sanitizeNetworkNode(node: any): NetworkNode {
+  const risk_score = Math.max(0, Math.min(100, parseFloat(node?.risk_score) || 0));
+  const risk_level = ['normal', 'low', 'medium', 'high'].includes(node?.risk_level)
+    ? node.risk_level as RiskLevel
+    : riskLevelFromScore(risk_score);
+  return {
+    id: typeof node?.id === 'string' ? node.id : uid(),
+    ip: typeof node?.ip === 'string' ? node.ip : '0.0.0.0',
+    risk_level,
+    risk_score,
+    action: ['monitor', 'rate_limit', 'block'].includes(node?.action) ? node.action as Action : actionFromLevel(risk_level),
+    event_count: Math.max(0, Math.floor(node?.event_count) || 0),
+    label: typeof node?.label === 'string' ? node.label : undefined,
+    country: typeof node?.country === 'string' ? node.country : undefined,
+  };
+}
+
+function sanitizeHuntingResult(payload: any): HuntingResult {
+  const normalized = normalizeSIEMEvent(payload);
+  return {
+    ...normalized,
+    first_seen: typeof payload?.first_seen === 'string' ? payload.first_seen : normalized.timestamp,
+    last_seen: typeof payload?.last_seen === 'string' ? payload.last_seen : normalized.timestamp,
+  };
+}
+
+function sanitizeDebugStats(payload: any): DebugStats {
+  return {
+    backend_started_at: typeof payload?.backend_started_at === 'string' ? payload.backend_started_at : null,
+    model_loaded: Boolean(payload?.model_loaded),
+    records_loaded: Math.max(0, Math.floor(payload?.records_loaded) || 0),
+    parsed_events_loaded: Math.max(0, Math.floor(payload?.parsed_events_loaded) || 0),
+    unique_ips: Math.max(0, Math.floor(payload?.unique_ips) || 0),
+    active_connections: Math.max(0, Math.floor(payload?.active_connections) || 0),
+    total_connections: Math.max(0, Math.floor(payload?.total_connections) || 0),
+    total_disconnects: Math.max(0, Math.floor(payload?.total_disconnects) || 0),
+    total_batches_sent: Math.max(0, Math.floor(payload?.total_batches_sent) || 0),
+    total_events_sent: Math.max(0, Math.floor(payload?.total_events_sent) || 0),
+    broadcast_errors: Math.max(0, Math.floor(payload?.broadcast_errors) || 0),
+    stream_position: Math.max(0, Math.floor(payload?.stream_position) || 0),
+    last_batch_at: typeof payload?.last_batch_at === 'string' ? payload.last_batch_at : null,
+    event_rate_per_sec: Math.max(0, parseFloat(payload?.event_rate_per_sec) || 0),
+    latest_volume: Math.max(0, Math.floor(payload?.latest_volume) || 0),
+    latest_risk: Math.max(0, Math.min(100, parseFloat(payload?.latest_risk) || 0)),
+    decision_count: Math.max(0, Math.floor(payload?.decision_count) || 0),
+    manual_overrides: Object.fromEntries(
+      Object.entries(payload?.manual_overrides ?? {}).map(([ip, override]) => [ip, normalizeManualOverride(override)!]),
+    ),
+  };
+}
+
 export async function fetchSystemMetricsAsync(): Promise<SystemMetrics> {
   if (!USE_REAL_API) {
     return getSystemMetrics();
   }
 
   try {
-    const res = await fetch(`${API_BASE_URL}/api/metrics`);
-    if (!res.ok) throw new Error(`API ${res.status}`);
-    return await res.json();
-  } catch (err) {
-    console.warn('[API] Metrics fetch failed, using fallback:', err);
-    return getSystemMetrics();
+    return await fetchJson<SystemMetrics>('/api/metrics');
+  } catch (error) {
+    console.warn('[API] Metrics fetch failed:', error);
+    return EMPTY_METRICS;
   }
 }
 
-/**
- * Fetch network nodes from real API.
- */
-export async function fetchNetworkNodesAsync(): Promise<NetworkNode[]> {
+export async function fetchTelemetryAsync(): Promise<TelemetryPoint[]> {
   if (!USE_REAL_API) {
-    return getNetworkNodes(16);
+    return getTelemetryHistory(12);
   }
 
   try {
-    const res = await fetch(`${API_BASE_URL}/api/network-nodes`);
-    if (!res.ok) throw new Error(`API ${res.status}`);
-    return await res.json();
-  } catch (err) {
-    console.warn('[API] Network nodes fetch failed, using fallback:', err);
-    return getNetworkNodes(16);
+    const payload = await fetchJson<any[]>('/api/telemetry');
+    return Array.isArray(payload) ? payload.map(sanitizeTelemetryPoint) : [];
+  } catch (error) {
+    console.warn('[API] Telemetry fetch failed:', error);
+    return [];
   }
 }
 
-/**
- * Fetch hunting results from real API.
- */
+export async function fetchDebugStatsAsync(): Promise<DebugStats> {
+  if (!USE_REAL_API) {
+    return EMPTY_DEBUG;
+  }
+
+  try {
+    const payload = await fetchJson<any>('/api/debug');
+    return sanitizeDebugStats(payload);
+  } catch (error) {
+    console.warn('[API] Debug fetch failed:', error);
+    return EMPTY_DEBUG;
+  }
+}
+
+export async function fetchNetworkNodesAsync(): Promise<NetworkNode[]> {
+  if (!USE_REAL_API) {
+    return getNetworkNodes();
+  }
+
+  try {
+    const payload = await fetchJson<any[]>('/api/network-nodes');
+    return Array.isArray(payload) ? payload.map(sanitizeNetworkNode) : [];
+  } catch (error) {
+    console.warn('[API] Network node fetch failed:', error);
+    return [];
+  }
+}
+
 export async function fetchHuntingResultsAsync(): Promise<HuntingResult[]> {
   if (!USE_REAL_API) {
     return getHuntingResults(15);
   }
 
   try {
-    const res = await fetch(`${API_BASE_URL}/api/hunting-results`);
-    if (!res.ok) throw new Error(`API ${res.status}`);
-    const events = await res.json();
-    return events.map((e: any) => {
-      // Normalize the event first
-      const normalized = normalizeSIEMEvent(e);
-      return {
-        ip: normalized.ip,
-        rule_score: normalized.rule_score,
-        anomaly_score: normalized.anomaly_score,
-        risk_score: normalized.risk_score,
-        risk_level: normalized.risk_level,
-        action: normalized.action,
-        strike_count: normalized.strike_count,
-        scoring_method: normalized.scoring_method,
-        reasons: normalized.reasons,
-        temporal_insight: normalized.temporal_insight,
-        first_seen: e.first_seen || normalized.timestamp,
-        last_seen: e.last_seen || normalized.timestamp,
-      };
-    });
-  } catch (err) {
-    console.warn('[API] Hunting results fetch failed, using fallback:', err);
-    return getHuntingResults(15);
+    const payload = await fetchJson<any[]>('/api/hunting-results');
+    return Array.isArray(payload) ? payload.map(sanitizeHuntingResult) : [];
+  } catch (error) {
+    console.warn('[API] Hunting results fetch failed:', error);
+    return [];
   }
 }
 
-/** Build a live log entry string (for LogExplorer / Dashboard stream). */
-export function formatLogLine(event: SIEMEvent): {
-  time: string;
-  level: LogSeverity;
-  message: string;
-} {
-  const levelMap: Record<RiskLevel, LogSeverity> = {
-    normal: 'INFO',
-    low:    'INFO',
-    medium: 'WARN',
-    high:   'CRIT',
-  };
-  const actionMsg: Record<Action, string> = {
-    monitor:    'Monitoring elevated activity',
-    rate_limit: 'Rate-limiting applied',
-    block:      'CONNECTION BLOCKED — threat isolated',
-  };
+export async function blockIpAsync(ip: string, reason = 'Blocked from dashboard'): Promise<void> {
+  await fetchJson('/api/actions/block-ip', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ip, reason, source: 'frontend' }),
+  });
+}
+
+export async function enforcePolicyAsync(ip: string, action: Action, reason = 'Policy enforced from dashboard'): Promise<void> {
+  await fetchJson('/api/actions/enforce-policy', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ip, action, reason, source: 'frontend' }),
+  });
+}
+
+export async function fetchIpHistoryAsync(ip: string): Promise<IpHistoryResponse> {
+  const payload = await fetchJson<any>(`/api/ip/${encodeURIComponent(ip)}/history`);
   return {
-    time:    timeLabel(),
-    level:   levelMap[event.risk_level],
-    message: `[${event.ip}] ${actionMsg[event.action]} | risk=${event.risk_score.toFixed(0)} rule=${event.rule_score} anomaly=${event.anomaly_score.toFixed(2)} | ${event.reasons[0]}`,
+    ip,
+    history: Array.isArray(payload?.history) ? payload.history.map(normalizeSIEMEvent) : [],
+    manual_override: normalizeManualOverride(payload?.manual_override),
   };
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// WEBSOCKET STREAMING
-// ═══════════════════════════════════════════════════════════════════════════════
+export async function fetchIpTimelineAsync(ip: string): Promise<IpTimelineResponse> {
+  const payload = await fetchJson<any>(`/api/ip/${encodeURIComponent(ip)}/timeline`);
+  return {
+    ip,
+    timeline: Array.isArray(payload?.timeline)
+      ? payload.timeline.map((point: any) => ({
+          id: typeof point?.id === 'string' ? point.id : uid(),
+          timestamp: typeof point?.timestamp === 'string' ? point.timestamp : new Date().toISOString(),
+          risk_score: Math.max(0, Math.min(100, parseFloat(point?.risk_score) || 0)),
+          rule_score: Math.max(0, Math.min(100, parseFloat(point?.rule_score) || 0)),
+          anomaly_score: Math.max(0, Math.min(1, parseFloat(point?.anomaly_score) || 0)),
+          action: ['monitor', 'rate_limit', 'block'].includes(point?.action) ? point.action as Action : 'monitor',
+          risk_level: ['normal', 'low', 'medium', 'high'].includes(point?.risk_level) ? point.risk_level as RiskLevel : 'normal',
+          event_count: Math.max(0, Math.floor(point?.event_count) || 0),
+          failed_count: Math.max(0, Math.floor(point?.failed_count) || 0),
+          request_rate: Math.max(0, parseFloat(point?.request_rate) || 0),
+          username_variance: Math.max(0, Math.floor(point?.username_variance) || 0),
+          failed_ratio: Math.max(0, Math.min(1, parseFloat(point?.failed_ratio) || 0)),
+        }))
+      : [],
+    manual_override: normalizeManualOverride(payload?.manual_override),
+  };
+}
+
+export async function fetchReportsAsync(): Promise<ReportSummary[]> {
+  const payload = await fetchJson<any[]>('/api/reports');
+  return Array.isArray(payload)
+    ? payload.map((report) => ({
+        id: typeof report?.id === 'string' ? report.id : uid(),
+        date: typeof report?.date === 'string' ? report.date : '',
+        label: typeof report?.label === 'string' ? report.label : (typeof report?.date === 'string' ? report.date : 'Unknown'),
+        status: typeof report?.status === 'string' ? report.status : 'Ready',
+        incident_count: Math.max(0, Math.floor(report?.incident_count) || 0),
+        high_risk_count: Math.max(0, Math.floor(report?.high_risk_count) || 0),
+        medium_risk_count: Math.max(0, Math.floor(report?.medium_risk_count) || 0),
+        baseline_count: Math.max(0, Math.floor(report?.baseline_count) || 0),
+        unique_ip_count: Math.max(0, Math.floor(report?.unique_ip_count) || 0),
+        generated_at: typeof report?.generated_at === 'string' ? report.generated_at : new Date().toISOString(),
+      }))
+    : [];
+}
+
+export async function fetchReportDetailAsync(reportId: string): Promise<ReportDetail> {
+  const payload = await fetchJson<any>(`/api/reports/${encodeURIComponent(reportId)}.json`);
+  return {
+    id: payload?.id ?? reportId,
+    date: payload?.date ?? '',
+    label: payload?.label ?? payload?.date ?? reportId,
+    status: payload?.status ?? 'Ready',
+    incident_count: Math.max(0, Math.floor(payload?.incident_count) || 0),
+    high_risk_count: Math.max(0, Math.floor(payload?.high_risk_count) || 0),
+    medium_risk_count: Math.max(0, Math.floor(payload?.medium_risk_count) || 0),
+    baseline_count: Math.max(0, Math.floor(payload?.baseline_count) || 0),
+    unique_ip_count: Math.max(0, Math.floor(payload?.unique_ip_count) || 0),
+    generated_at: typeof payload?.generated_at === 'string' ? payload.generated_at : new Date().toISOString(),
+    unique_ips: Array.isArray(payload?.unique_ips) ? payload.unique_ips.filter((item: unknown) => typeof item === 'string') : [],
+    top_events: Array.isArray(payload?.top_events) ? payload.top_events.map(normalizeSIEMEvent) : [],
+    manual_overrides: Object.fromEntries(
+      Object.entries(payload?.manual_overrides ?? {}).map(([ip, override]) => [ip, normalizeManualOverride(override)!]),
+    ),
+  };
+}
+
+async function downloadBlob(path: string, filename: string): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}${path}`);
+  if (!response.ok) {
+    throw new Error(`API ${response.status}`);
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+export async function downloadReportJsonAsync(reportId: string): Promise<void> {
+  await downloadBlob(`/api/reports/${encodeURIComponent(reportId)}.json`, `${reportId}.json`);
+}
+
+export async function downloadReportPdfAsync(reportId: string): Promise<void> {
+  await downloadBlob(`/api/reports/${encodeURIComponent(reportId)}.pdf`, `${reportId}.pdf`);
+}
+
+export function formatLogLine(event: SIEMEvent): { time: string; level: LogSeverity; message: string } {
+  const levelMap: Record<RiskLevel, LogSeverity> = {
+    normal: 'INFO',
+    low: 'INFO',
+    medium: 'WARN',
+    high: 'CRIT',
+  };
+  const actionMsg: Record<Action, string> = {
+    monitor: 'Monitoring elevated activity',
+    rate_limit: 'Rate-limiting applied',
+    block: 'Connection blocked',
+  };
+  const eventTime = new Date(event.timestamp);
+  const time = Number.isNaN(eventTime.getTime())
+    ? '--:--:--'
+    : eventTime.toLocaleTimeString('id-ID', { hour12: false });
+
+  return {
+    time,
+    level: levelMap[event.risk_level],
+    message: `[${event.ip}] ${actionMsg[event.action]} | risk=${event.risk_score.toFixed(0)} rule=${event.rule_score} anomaly=${event.anomaly_score.toFixed(2)} | ${event.reasons[0] ?? 'No reasons'}`,
+  };
+}
 
 export type StreamEventHandler = (events: SIEMEvent[]) => void;
 export type StreamErrorHandler = (error: Error) => void;
 export type StreamStatusHandler = (status: 'CONNECTING' | 'CONNECTED' | 'DISCONNECTED' | 'ERROR') => void;
 
-/**
- * WebSocket stream manager for real-time events.
- * 
- * Usage:
- *   const stream = createStreamManager();
- *   stream.onStatus(status => console.log(status));
- *   stream.onEvents(events => setEvents(events));
- *   stream.connect();
- *   // ... later
- *   stream.disconnect();
- */
 export class SIEMStreamManager {
   private ws: WebSocket | null = null;
   private reconnectAttempts = 0;
-  private maxReconnectAttempts = 5;
-  private reconnectDelay = 3000;
+  private readonly maxReconnectAttempts = 5;
+  private readonly reconnectDelay = 3000;
+  private reconnectTimer: number | null = null;
+  private shouldReconnect = true;
   private eventHandlers: StreamEventHandler[] = [];
   private statusHandlers: StreamStatusHandler[] = [];
   private errorHandlers: StreamErrorHandler[] = [];
   private mockIntervalId: number | null = null;
 
-  constructor(private useRealApi = USE_REAL_API) {}
+  constructor(private readonly useRealApi = USE_REAL_API) {}
 
-  /**
-   * Subscribe to stream events.
-   */
   onEvents(handler: StreamEventHandler): () => void {
     this.eventHandlers.push(handler);
     return () => {
-      this.eventHandlers = this.eventHandlers.filter(h => h !== handler);
+      this.eventHandlers = this.eventHandlers.filter((item) => item !== handler);
     };
   }
 
-  /**
-   * Subscribe to connection status changes.
-   */
   onStatus(handler: StreamStatusHandler): () => void {
     this.statusHandlers.push(handler);
     return () => {
-      this.statusHandlers = this.statusHandlers.filter(h => h !== handler);
+      this.statusHandlers = this.statusHandlers.filter((item) => item !== handler);
     };
   }
 
-  /**
-   * Subscribe to errors.
-   */
   onError(handler: StreamErrorHandler): () => void {
     this.errorHandlers.push(handler);
     return () => {
-      this.errorHandlers = this.errorHandlers.filter(h => h !== handler);
+      this.errorHandlers = this.errorHandlers.filter((item) => item !== handler);
     };
   }
 
-  /**
-   * Connect to stream (real WebSocket or mock polling).
-   */
   connect(): void {
+    this.shouldReconnect = true;
+
     if (!this.useRealApi) {
       this.connectMock();
       return;
     }
 
     this.notifyStatus('CONNECTING');
-
-    const wsUrl = `ws://127.0.0.1:8001/api/stream`;
-
-    this.ws = new WebSocket(wsUrl);
+    this.ws = new WebSocket(`${API_BASE_URL.replace(/^http/, 'ws')}/api/stream`);
 
     this.ws.onopen = () => {
-      console.log('[Stream] Connected to WebSocket');
       this.reconnectAttempts = 0;
       this.notifyStatus('CONNECTED');
     };
 
     this.ws.onmessage = (event) => {
       try {
-        const message = JSON.parse(event.data);
-        if (message.data && Array.isArray(message.data)) {
-          // Normalize all events before notifying
-          const normalized = message.data.map((e: any) => normalizeSIEMEvent(e));
-          this.notifyEvents(normalized);
+        const payload = JSON.parse(event.data);
+        if (payload?.data && Array.isArray(payload.data)) {
+          this.notifyEvents(payload.data.map(normalizeSIEMEvent));
         }
       } catch (error) {
+        this.notifyError(new Error('Failed to parse WebSocket payload'));
         console.error('[Stream] Failed to parse message:', error);
       }
     };
 
-    this.ws.onerror = (error) => {
-      console.error('[Stream] WebSocket error:', error);
+    this.ws.onerror = () => {
       this.notifyError(new Error('WebSocket error'));
       this.notifyStatus('ERROR');
     };
 
     this.ws.onclose = () => {
-      console.log('[Stream] WebSocket closed');
       this.notifyStatus('DISCONNECTED');
-      this.attemptReconnect();
+      if (this.shouldReconnect) {
+        this.attemptReconnect();
+      }
     };
   }
 
-  /**
-   * Mock streaming (polling-based for development/fallback).
-   */
   private connectMock(): void {
-    console.log('[Stream] Using mock streaming');
     this.notifyStatus('CONNECTED');
-
     this.mockIntervalId = window.setInterval(() => {
-      const events = generateEventBatch(1);
-      this.notifyEvents(events);
+      this.notifyEvents(generateEventBatch(1));
     }, 2000) as unknown as number;
   }
 
-  /**
-   * Attempt to reconnect with exponential backoff.
-   */
   private attemptReconnect(): void {
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
       this.notifyError(new Error('Max reconnection attempts exceeded'));
@@ -573,18 +741,22 @@ export class SIEMStreamManager {
       return;
     }
 
-    this.reconnectAttempts++;
+    this.reconnectAttempts += 1;
     const delay = this.reconnectDelay * Math.pow(1.5, this.reconnectAttempts - 1);
-
-    console.log(`[Stream] Reconnecting in ${Math.round(delay)}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
-
-    setTimeout(() => this.connect(), delay);
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+    }
+    this.reconnectTimer = window.setTimeout(() => this.connect(), delay);
   }
 
-  /**
-   * Disconnect from stream.
-   */
   disconnect(): void {
+    this.shouldReconnect = false;
+
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
     if (this.ws) {
       this.ws.close();
       this.ws = null;
@@ -598,14 +770,9 @@ export class SIEMStreamManager {
     this.notifyStatus('DISCONNECTED');
   }
 
-  /**
-   * Check if connected.
-   */
   isConnected(): boolean {
     return this.ws?.readyState === WebSocket.OPEN || this.mockIntervalId !== null;
   }
-
-  // ─── Notify Subscribers ────────────────────────────────────────────────────
 
   private notifyEvents(events: SIEMEvent[]): void {
     for (const handler of this.eventHandlers) {
@@ -631,16 +798,13 @@ export class SIEMStreamManager {
     for (const handler of this.errorHandlers) {
       try {
         handler(error);
-      } catch (e) {
-        console.error('[Stream] Error in error handler:', e);
+      } catch (handlerError) {
+        console.error('[Stream] Error in error handler:', handlerError);
       }
     }
   }
 }
 
-/**
- * Create a new stream manager instance.
- */
 export function createStreamManager(): SIEMStreamManager {
   return new SIEMStreamManager(USE_REAL_API);
 }

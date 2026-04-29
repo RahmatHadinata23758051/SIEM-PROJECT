@@ -1,56 +1,70 @@
-import React, { useState, useMemo } from 'react';
-import { 
-  ShieldAlert, History, Gavel, BrainCircuit, ShieldX,
-  TrendingUp, ChevronRight, Globe, Database, Users, Activity, Terminal
+import React, { useEffect, useMemo, useState } from 'react';
+import {
+  Activity,
+  BrainCircuit,
+  ChevronRight,
+  Globe,
+  Gavel,
+  History,
+  ShieldAlert,
+  ShieldX,
+  Terminal,
+  TrendingUp,
+  Users,
 } from 'lucide-react';
-import { cn } from '../lib/utils';
+import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { motion } from 'motion/react';
-import { 
-  AreaChart, Area, XAxis, YAxis, Tooltip,
-  ResponsiveContainer, CartesianGrid,
-} from 'recharts';
+import { cn } from '../lib/utils';
+import { fetchHuntingResultsAsync, type HuntingResult } from '../lib/api';
 import { useSIEMStream } from '../hooks/useSIEMStream';
-import { getHuntingResults, type HuntingResult } from '../lib/api';
-
-// ─── Component ────────────────────────────────────────────────────────────────
 
 export default function ThreatHunting() {
-  const { events, telemetry } = useSIEMStream();
+  const { events, telemetry, setSelectedIp, enforcePolicy } = useSIEMStream();
+  const [fallbackTarget, setFallbackTarget] = useState<HuntingResult | null>(null);
 
-  // Pick highest-risk event from live events as the "active incident"
+  useEffect(() => {
+    if (events.length > 0) return;
+    let cancelled = false;
+    fetchHuntingResultsAsync()
+      .then((results) => {
+        if (!cancelled) {
+          setFallbackTarget(results[0] ?? null);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setFallbackTarget(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [events.length]);
+
   const target: HuntingResult | null = useMemo(() => {
-    if (!events || events.length === 0) {
-      return getHuntingResults(1)[0] ?? null; // Fallback to mock if no events
+    if (events.length === 0) {
+      return fallbackTarget;
     }
-    
-    // Find highest-risk event and convert to HuntingResult
-    const topEvent = [...events].sort((a, b) => b.risk_score - a.risk_score)[0];
+
+    const topEvent = [...events].sort((left, right) => right.risk_score - left.risk_score)[0];
     if (!topEvent) return null;
-    
+
     return {
-      ip: topEvent.ip,
-      rule_score: topEvent.rule_score,
-      anomaly_score: topEvent.anomaly_score,
-      risk_score: topEvent.risk_score,
-      risk_level: topEvent.risk_level,
-      action: topEvent.action,
-      strike_count: topEvent.strike_count,
-      scoring_method: topEvent.scoring_method,
-      reasons: topEvent.reasons,
-      temporal_insight: topEvent.temporal_insight,
+      ...topEvent,
       first_seen: topEvent.timestamp,
       last_seen: topEvent.timestamp,
     };
-  }, [events]);
+  }, [events, fallbackTarget]);
 
-  // Build trend data from live telemetry
-  const trendData = useMemo(() =>
-    telemetry.map(p => ({
-      name: p.time,
-      risk: Math.round((p.risk / 9800) * 100),
-      req:  p.volume,
-    })),
-  [telemetry]);
+  const trendData = useMemo(
+    () =>
+      telemetry.map((point) => ({
+        name: point.time,
+        risk: point.risk,
+        req: point.volume,
+      })),
+    [telemetry],
+  );
 
   if (!target) {
     return (
@@ -60,25 +74,49 @@ export default function ThreatHunting() {
     );
   }
 
-  const riskPct     = Math.round(target.risk_score);
-  const dashOffset  = 251.2 - (251.2 * riskPct) / 100;
-  const isBlocked   = target.action === 'block';
-  const isRateLim   = target.action === 'rate_limit';
+  const riskPct = Math.round(target.risk_score);
+  const dashOffset = 251.2 - (251.2 * riskPct) / 100;
+  const isBlocked = target.action === 'block';
+  const isRateLimited = target.action === 'rate_limit';
   const confidencePct = Math.round(target.anomaly_score * 100);
 
-  const actionLabel = isBlocked ? 'Blocked' : isRateLim ? 'Rate Limited' : 'Monitoring';
-
-  // Factor cards driven by target
   const factors = [
-    { title: 'failed_count',      value: String(Math.round(target.risk_score * 5)),  icon: <Terminal size={18} />, status: riskPct >= 85 ? 'CRITICAL THRESHOLD' : 'ELEVATED', percentage: riskPct,         color: 'error'   as const },
-    { title: 'request_rate',      value: `${(target.anomaly_score * 150).toFixed(0)}/s`, icon: <Activity size={18} />, status: 'ELEVATED', percentage: Math.round(target.anomaly_score * 100),  color: 'tertiary' as const },
-    { title: 'username_variance', value: target.anomaly_score.toFixed(2),            icon: <Users size={18} />,    status: 'HIGH SPREAD', percentage: Math.round(target.anomaly_score * 100),  color: 'error'   as const },
-    { title: 'anomaly_score',     value: target.anomaly_score.toFixed(2),            icon: <BrainCircuit size={18} />, status: 'AI CONFIDENCE', percentage: confidencePct, color: 'primary' as const },
+    {
+      title: 'failed_count',
+      value: String(target.failed_count),
+      icon: <Terminal size={18} />,
+      status: target.failed_count >= 8 ? 'CRITICAL THRESHOLD' : 'OBSERVED',
+      percentage: Math.min(100, target.failed_count * 10),
+      color: 'error' as const,
+    },
+    {
+      title: 'request_rate',
+      value: `${target.request_rate.toFixed(3)}/s`,
+      icon: <Activity size={18} />,
+      status: target.request_rate >= 0.08 ? 'ELEVATED' : 'BASELINE',
+      percentage: Math.min(100, Math.round(target.request_rate * 1000)),
+      color: 'tertiary' as const,
+    },
+    {
+      title: 'username_variance',
+      value: String(target.username_variance),
+      icon: <Users size={18} />,
+      status: target.username_variance <= 2 ? 'LOW DIVERSITY' : 'NORMAL SPREAD',
+      percentage: Math.min(100, target.username_variance * 12),
+      color: 'error' as const,
+    },
+    {
+      title: 'anomaly_score',
+      value: target.anomaly_score.toFixed(2),
+      icon: <BrainCircuit size={18} />,
+      status: 'AI CONFIDENCE',
+      percentage: confidencePct,
+      color: 'primary' as const,
+    },
   ];
 
   return (
     <div className="p-6 flex flex-col gap-6 h-full overflow-y-auto">
-      {/* Header Section */}
       <div className="flex items-end justify-between border-b border-outline-variant/30 pb-6">
         <div className="space-y-1">
           <div className="flex items-center gap-2 text-on-surface-variant font-medium text-xs mb-2">
@@ -86,39 +124,45 @@ export default function ThreatHunting() {
             <ChevronRight size={14} />
             <span>Active Incidents</span>
             <ChevronRight size={14} />
-            <span className="text-on-surface">INC-{Math.abs(target.ip.split('.').reduce((a,b) => a + parseInt(b), 0))}</span>
+            <span className="text-on-surface">INC-{Math.abs(target.ip.split('.').reduce((sum, item) => sum + parseInt(item, 10), 0))}</span>
           </div>
           <div className="flex items-center gap-4">
             <h1 className="text-2xl font-bold text-on-surface flex items-center gap-3">
               <Globe className="text-outline-variant" />
               {target.ip}
             </h1>
-            <div className={cn(
-              'border px-3 py-1 rounded-full flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest',
-              isBlocked  ? 'bg-error/10 border-error/40 text-error' :
-              isRateLim  ? 'bg-tertiary/10 border-tertiary/40 text-tertiary' :
-              'bg-primary/10 border-primary/40 text-primary',
-            )}>
+            <div
+              className={cn(
+                'border px-3 py-1 rounded-full flex items-center gap-2 text-[10px] font-bold uppercase tracking-widest',
+                isBlocked ? 'bg-error/10 border-error/40 text-error' :
+                isRateLimited ? 'bg-tertiary/10 border-tertiary/40 text-tertiary' :
+                'bg-primary/10 border-primary/40 text-primary',
+              )}
+            >
               <ShieldAlert size={14} />
               {target.risk_level.charAt(0).toUpperCase() + target.risk_level.slice(1)} Risk
             </div>
           </div>
         </div>
         <div className="flex gap-2">
-          <button className="bg-surface-container border border-outline-variant/30 hover:bg-surface-container-high text-on-surface px-4 py-2 rounded-lg font-semibold text-xs flex items-center gap-2 transition-all">
+          <button
+            onClick={() => setSelectedIp(target.ip)}
+            className="bg-surface-container border border-outline-variant/30 hover:bg-surface-container-high text-on-surface px-4 py-2 rounded-lg font-semibold text-xs flex items-center gap-2 transition-all"
+          >
             <History size={16} />
             View History
           </button>
-          <button className="bg-primary hover:bg-primary-container text-on-primary px-4 py-2 rounded-lg font-bold text-xs flex items-center gap-2 transition-all shadow-[0_0_15px_rgba(173,198,255,0.2)]">
+          <button
+            onClick={() => void enforcePolicy(target.ip, target.risk_score >= 85 ? 'block' : 'rate_limit', 'Enforced from Threat Hunting')}
+            className="bg-primary hover:bg-primary-container text-on-primary px-4 py-2 rounded-lg font-bold text-xs flex items-center gap-2 transition-all shadow-[0_0_15px_rgba(173,198,255,0.2)]"
+          >
             <Gavel size={16} />
             Enforce Policy
           </button>
         </div>
       </div>
 
-      {/* Bento Grid layout */}
       <div className="grid grid-cols-12 gap-6">
-        {/* Risk Score Gauge */}
         <div className="col-span-12 md:col-span-4 bg-surface-container rounded-xl border border-outline-variant/30 p-6 flex flex-col items-center justify-center relative overflow-hidden group">
           <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-error to-transparent opacity-50 transition-opacity group-hover:opacity-100" />
           <h3 className="text-sm font-bold text-on-surface-variant uppercase tracking-widest self-start w-full border-b border-outline-variant/20 pb-4 mb-6">
@@ -129,7 +173,9 @@ export default function ThreatHunting() {
             <svg className="w-full h-full transform -rotate-90" viewBox="0 0 100 100">
               <circle cx="50" cy="50" r="40" className="text-surface-container-highest" fill="transparent" stroke="currentColor" strokeWidth="8" />
               <motion.circle
-                cx="50" cy="50" r="40"
+                cx="50"
+                cy="50"
+                r="40"
                 className="text-error"
                 fill="transparent"
                 stroke="currentColor"
@@ -152,7 +198,6 @@ export default function ThreatHunting() {
           </p>
         </div>
 
-        {/* AI Decision Engine */}
         <div className="col-span-12 md:col-span-8 bg-surface-container rounded-xl border border-outline-variant/30 p-6 flex flex-col">
           <div className="flex items-center justify-between border-b border-outline-variant/20 pb-4 mb-6">
             <h3 className="text-sm font-bold text-on-surface uppercase tracking-widest flex items-center gap-2">
@@ -165,45 +210,46 @@ export default function ThreatHunting() {
           </div>
 
           <div className="flex items-center justify-between mb-8 bg-surface-container-low/50 p-1.5 rounded-xl border border-outline-variant/10">
-            <DecisionStep label="Normal"     active={target.action === 'monitor' && target.risk_level === 'normal'} />
+            <DecisionStep label="Normal" active={target.action === 'monitor' && target.risk_level === 'normal'} />
             <DecisionStep label="Monitoring" active={target.action === 'monitor' && target.risk_level !== 'normal'} />
             <DecisionStep label="Rate Limited" active={target.action === 'rate_limit'} />
-            <DecisionStep label="Blocked"    active={target.action === 'block'} variant="error" />
+            <DecisionStep label="Blocked" active={target.action === 'block'} variant="error" />
           </div>
 
           <div className="bg-surface-container-low border border-outline-variant/20 rounded-xl p-6 relative overflow-hidden">
-            <div className={cn('absolute left-0 top-0 bottom-0 w-1', isBlocked ? 'bg-error' : isRateLim ? 'bg-tertiary' : 'bg-primary')} />
+            <div className={cn('absolute left-0 top-0 bottom-0 w-1', isBlocked ? 'bg-error' : isRateLimited ? 'bg-tertiary' : 'bg-primary')} />
             <h4 className="text-[10px] font-bold text-on-surface uppercase tracking-widest mb-3 flex items-center gap-2">
               <Terminal size={14} className="text-error" />
               Automated Rationale
             </h4>
             <p className="text-sm text-on-surface-variant leading-relaxed">
-              {target.reasons.map((r, i) => (
-                <span key={i}>
-                  {i > 0 && ' · '}
-                  <span className={i === 0 ? 'text-on-surface font-medium' : ''}>{r}</span>
+              {target.reasons.map((reason, index) => (
+                <span key={index}>
+                  {index > 0 && ' · '}
+                  <span className={index === 0 ? 'text-on-surface font-medium' : ''}>{reason}</span>
                 </span>
               ))}
               {target.temporal_insight && (
-                <> · <span className="text-primary font-bold">{target.temporal_insight}</span></>
+                <>
+                  {' '}
+                  · <span className="text-primary font-bold">{target.temporal_insight}</span>
+                </>
               )}
             </p>
           </div>
         </div>
 
-        {/* Risk Factor Breakdown */}
         <div className="col-span-12">
           <h3 className="text-sm font-bold text-on-surface uppercase tracking-widest border-b border-outline-variant/20 pb-4 mb-6">
             Risk Factor Breakdown
           </h3>
           <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-            {factors.map(f => (
-              <FactorCard key={f.title} {...f} />
+            {factors.map((factor) => (
+              <FactorCard key={factor.title} {...factor} />
             ))}
           </div>
         </div>
 
-        {/* Activity & Trend */}
         <div className="col-span-12 bg-surface-container rounded-xl border border-outline-variant/30 p-6">
           <div className="flex items-center justify-between border-b border-outline-variant/20 pb-4 mb-6">
             <h3 className="text-sm font-bold text-on-surface uppercase tracking-widest flex items-center gap-2">
@@ -221,25 +267,15 @@ export default function ThreatHunting() {
               <AreaChart data={trendData}>
                 <defs>
                   <linearGradient id="colorRisk" x1="0" y1="0" x2="0" y2="100%">
-                    <stop offset="5%"  stopColor="#ffb4ab" stopOpacity={0.3} />
+                    <stop offset="5%" stopColor="#ffb4ab" stopOpacity={0.3} />
                     <stop offset="95%" stopColor="#ffb4ab" stopOpacity={0} />
                   </linearGradient>
                 </defs>
                 <CartesianGrid strokeDasharray="3 3" stroke="#424754" vertical={false} opacity={0.2} />
                 <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#8c909f', fontFamily: 'monospace' }} />
                 <YAxis hide />
-                <Tooltip
-                  contentStyle={{ backgroundColor: '#1d2027', borderColor: '#424754', borderRadius: '8px' }}
-                  itemStyle={{ fontSize: '11px', fontWeight: 'bold' }}
-                />
-                <Area
-                  type="monotone"
-                  dataKey="risk"
-                  stroke="#ffb4ab"
-                  strokeWidth={2}
-                  fillOpacity={1}
-                  fill="url(#colorRisk)"
-                />
+                <Tooltip contentStyle={{ backgroundColor: '#1d2027', borderColor: '#424754', borderRadius: '8px' }} itemStyle={{ fontSize: '11px', fontWeight: 'bold' }} />
+                <Area type="monotone" dataKey="risk" stroke="#ffb4ab" strokeWidth={2} fillOpacity={1} fill="url(#colorRisk)" />
               </AreaChart>
             </ResponsiveContainer>
           </div>
@@ -249,28 +285,37 @@ export default function ThreatHunting() {
   );
 }
 
-// ─── Sub-components ───────────────────────────────────────────────────────────
-
 function DecisionStep({ label, active, variant }: { label: string; active?: boolean; variant?: 'error' }) {
   return (
-    <div className={cn(
-      'flex-1 text-center py-2 rounded-lg font-mono text-[10px] font-bold uppercase tracking-widest transition-all',
-      active
-        ? (variant === 'error' ? 'bg-error text-on-error shadow-[0_0_15px_#ffb4ab]' : 'bg-primary text-on-primary')
-        : 'text-on-surface-variant/40',
-    )}>
+    <div
+      className={cn(
+        'flex-1 text-center py-2 rounded-lg font-mono text-[10px] font-bold uppercase tracking-widest transition-all',
+        active ? (variant === 'error' ? 'bg-error text-on-error shadow-[0_0_15px_#ffb4ab]' : 'bg-primary text-on-primary') : 'text-on-surface-variant/40',
+      )}
+    >
       {active && <ShieldX size={12} className="inline mr-2 mb-0.5" />}
       {label}
     </div>
   );
 }
 
-function FactorCard({ title, value, icon, status, percentage, color }: {
-  title: string; value: string; icon: React.ReactNode;
-  status: string; percentage: number; color: 'error' | 'primary' | 'tertiary';
+function FactorCard({
+  title,
+  value,
+  icon,
+  status,
+  percentage,
+  color,
+}: {
+  title: string;
+  value: string;
+  icon: React.ReactNode;
+  status: string;
+  percentage: number;
+  color: 'error' | 'primary' | 'tertiary';
 }) {
-  const colorClass   = color === 'error' ? 'text-error'   : color === 'primary' ? 'text-primary'   : 'text-tertiary';
-  const bgColorClass = color === 'error' ? 'bg-error'     : color === 'primary' ? 'bg-primary'     : 'bg-tertiary';
+  const colorClass = color === 'error' ? 'text-error' : color === 'primary' ? 'text-primary' : 'text-tertiary';
+  const bgColorClass = color === 'error' ? 'bg-error' : color === 'primary' ? 'bg-primary' : 'bg-tertiary';
 
   return (
     <div className="bg-surface-container-low p-5 rounded-xl border border-outline-variant/10 flex flex-col justify-between group hover:border-outline-variant transition-colors ring-1 ring-inset ring-transparent hover:ring-outline-variant/30">

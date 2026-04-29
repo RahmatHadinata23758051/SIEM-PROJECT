@@ -1,30 +1,35 @@
-import asyncio
-import random
-import time
-from datetime import datetime, timedelta
-from pathlib import Path
-from typing import List, Dict, Any
-import json
+from __future__ import annotations
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+import asyncio
+import hashlib
+import io
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Literal
+
+import matplotlib
+import matplotlib.pyplot as plt
+import jwt
+from fastapi import FastAPI, HTTPException, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import jwt
 
-# Import from the hybrid_siem pipeline
-from hybrid_siem.models import FeatureRecord
-from hybrid_siem.pipeline import process_feature_records, PipelineDecision
-from hybrid_siem.risk import RiskWeights
-from hybrid_siem.detection import RuleThresholds
-from hybrid_siem.watchlist import WatchlistManager
-from hybrid_siem.parsers import parse_auth_log_file
-from hybrid_siem.features import build_feature_records
-from hybrid_siem.anomaly import fit_isolation_forest, IsolationForestConfig
+from hybrid_siem.anomaly import IsolationForestConfig, fit_isolation_forest
 from hybrid_siem.calibration import select_likely_normal_records
+from hybrid_siem.detection import RuleThresholds
+from hybrid_siem.features import build_feature_records
+from hybrid_siem.models import FeatureRecord, SshAuthEvent
+from hybrid_siem.parsers import parse_auth_log_file
+from hybrid_siem.pipeline import PipelineDecision, process_feature_records
+from hybrid_siem.risk import RiskWeights
+from hybrid_siem.watchlist import WatchlistManager
+
+matplotlib.use("Agg")
 
 app = FastAPI(title="Aegis AI SIEM Backend")
 
-# Enable CORS for frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -35,118 +40,204 @@ app.add_middleware(
 
 SECRET_KEY = "aegis_super_secret_key"
 
+
+def utc_now() -> datetime:
+    return datetime.utcnow()
+
+
+def iso_utc(value: datetime) -> str:
+    return value.isoformat() + "Z"
+
+
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+
+class BlockIPRequest(BaseModel):
+    ip: str
+    reason: str | None = None
+    source: str = "ui"
+
+
+class EnforcePolicyRequest(BaseModel):
+    ip: str
+    action: Literal["monitor", "rate_limit", "block"] = "rate_limit"
+    reason: str | None = None
+    source: str = "ui"
+
+
+@dataclass(slots=True)
+class PolicyOverride:
+    ip: str
+    action: str
+    reason: str
+    source: str
+    created_at: datetime
+
+
+@dataclass(slots=True)
+class StreamRuntimeStats:
+    total_connections: int = 0
+    total_disconnects: int = 0
+    total_batches_sent: int = 0
+    total_events_sent: int = 0
+    broadcast_errors: int = 0
+    last_batch_at: datetime | None = None
+
 
 @app.post("/api/auth/login")
 async def login(req: LoginRequest):
     if req.username == "admin" and req.password == "admin":
         token = jwt.encode(
-            {"sub": req.username, "exp": datetime.utcnow().timestamp() + 3600}, 
-            SECRET_KEY, 
-            algorithm="HS256"
+            {"sub": req.username, "exp": utc_now().timestamp() + 3600},
+            SECRET_KEY,
+            algorithm="HS256",
         )
         return {"token": token}
     raise HTTPException(status_code=401, detail="Invalid credentials")
 
 
 # ---------------------------------------------------------
-# Global Pipeline State (Load at startup)
+# Global Runtime State
 # ---------------------------------------------------------
-watchlist = WatchlistManager()
 thresholds = RuleThresholds()
 weights = RiskWeights()
+stream_watchlist = WatchlistManager()
+backend_started_at = utc_now()
 
-# Anomaly model (loaded at startup)
 anomaly_model = None
-# Real feature records from log
+parsed_auth_events: list[SshAuthEvent] = []
 real_feature_records: List[FeatureRecord] = []
-# Track position for streaming
+manual_overrides: dict[str, PolicyOverride] = {}
+runtime_stats = StreamRuntimeStats()
 _stream_position = 0
 
 
-def load_real_data():
+def load_real_data() -> None:
     """Load real data from auth log and train anomaly model."""
-    global anomaly_model, real_feature_records
-    
+    global anomaly_model, parsed_auth_events, real_feature_records, _stream_position
+
+    parsed_auth_events = []
+    real_feature_records = []
+    anomaly_model = None
+    _stream_position = 0
+
     log_path = Path("data/samples/auth.log")
     if not log_path.exists():
-        print(f"[WARN] Log file not found at {log_path}, using synthetic data fallback")
+        print(f"[WARN] Log file not found at {log_path}")
         return
-    
+
     print(f"[INFO] Loading real auth log from {log_path}")
-    
-    # Parse log
+
     try:
-        events = parse_auth_log_file(log_path)
-        print(f"[OK] Parsed {len(events)} events")
-    except Exception as e:
-        print(f"[WARN] Failed to parse log: {e}")
+        parsed_auth_events = parse_auth_log_file(log_path)
+        print(f"[OK] Parsed {len(parsed_auth_events)} events")
+    except Exception as exc:
+        print(f"[WARN] Failed to parse log: {exc}")
         return
-    
-    # Extract features
+
     try:
-        real_feature_records = build_feature_records(events)
+        real_feature_records = build_feature_records(parsed_auth_events)
         print(f"[OK] Extracted {len(real_feature_records)} feature records")
-    except Exception as e:
-        print(f"[WARN] Failed to extract features: {e}")
+    except Exception as exc:
+        print(f"[WARN] Failed to extract features: {exc}")
         return
-    
-    # Train anomaly model
+
+    if not real_feature_records:
+        print("[WARN] No feature records available for model training")
+        return
+
     try:
         normal_records = select_likely_normal_records(real_feature_records)
         print(f"[OK] Selected {len(normal_records)} normal records for training")
-        
         config = IsolationForestConfig()
-        anomaly_model = fit_isolation_forest(normal_records, config=config)
-        print(f"[OK] Anomaly model trained successfully")
-    except Exception as e:
-        print(f"[WARN] Failed to train model: {e}")
-        return
+        anomaly_model = fit_isolation_forest(normal_records, config=config, source_label="real_auth_log")
+        print("[OK] Anomaly model trained successfully")
+    except Exception as exc:
+        print(f"[WARN] Failed to train model: {exc}")
 
 
-def get_real_or_fallback_records(count: int) -> List[FeatureRecord]:
-    """Get real records (cycling) or fallback to synthetic."""
+def get_stream_records(count: int) -> List[FeatureRecord]:
+    """Return a stable rotating slice of real records for streaming."""
     global _stream_position
-    
+
     if not real_feature_records:
-        # Fallback: generate synthetic
-        return [generate_random_feature_record() for _ in range(count)]
-    
-    # Cycle through real records
-    records = []
-    for _ in range(count):
+        return []
+
+    records: list[FeatureRecord] = []
+    for _ in range(min(count, len(real_feature_records))):
         records.append(real_feature_records[_stream_position % len(real_feature_records)])
         _stream_position += 1
-    
     return records
 
 
-def generate_random_feature_record() -> FeatureRecord:
-    """Fallback: Generate synthetic feature record."""
-    SUSPICIOUS_IPS = [
-        '203.0.113.45', '185.220.101.12', '45.33.32.156', '198.51.100.77',
-        '91.108.4.200',  '162.158.92.10',  '104.21.16.35',  '172.67.200.4',
-        '77.88.55.60',   '8.8.8.8', '185.15.58.22', '210.10.5.44',
-    ]
-    return FeatureRecord(
-        ip=random.choice(SUSPICIOUS_IPS),
-        timestamp=datetime.utcnow(),
-        failed_count=random.randint(0, 20),
-        request_rate=round(random.uniform(0.0, 0.2), 3),
-        username_variance=random.randint(1, 8),
-        inter_arrival_avg=round(random.uniform(0.1, 5.0), 2),
-        failed_ratio=round(random.uniform(0.0, 1.0), 2),
-        event_count=random.randint(1, 15),
-        total_attempts=random.randint(1, 30)
+def _score_records(
+    records: list[FeatureRecord],
+    *,
+    watchlist: WatchlistManager | None = None,
+) -> list[PipelineDecision]:
+    if not records or anomaly_model is None:
+        return []
+
+    anomaly_scores = anomaly_model.score_lookup(records)
+    return process_feature_records(
+        records=records,
+        thresholds=thresholds,
+        weights=weights,
+        watchlist=watchlist,
+        anomaly_scores=anomaly_scores,
     )
+
+
+def _compute_snapshot_decisions() -> list[PipelineDecision]:
+    """Compute deterministic decisions for the current dataset."""
+    if not real_feature_records or anomaly_model is None:
+        return []
+    return _score_records(real_feature_records, watchlist=WatchlistManager())
+
+
+def _stable_event_id(record: FeatureRecord) -> str:
+    digest = hashlib.sha1(f"{record.ip}|{record.timestamp.isoformat()}".encode("utf-8")).hexdigest()[:16]
+    return f"evt-{digest}"
+
+
+def _serialize_override(override: PolicyOverride) -> dict[str, str]:
+    return {
+        "action": override.action,
+        "reason": override.reason,
+        "source": override.source,
+        "created_at": iso_utc(override.created_at),
+    }
+
+
+def _apply_manual_override(payload: dict[str, Any], ip: str) -> dict[str, Any]:
+    override = manual_overrides.get(ip)
+    if override is None:
+        payload["manual_override"] = None
+        return payload
+
+    reasons = list(payload.get("reasons") or [])
+    reasons.insert(0, f"Manual policy override: {override.action.upper()} ({override.reason})")
+    payload["reasons"] = reasons[:10]
+    payload["manual_override"] = _serialize_override(override)
+
+    if override.action == "block":
+        payload["risk_score"] = max(float(payload["risk_score"]), 95.0)
+        payload["risk_level"] = "high"
+        payload["action"] = "block"
+    elif override.action == "rate_limit":
+        payload["risk_score"] = max(float(payload["risk_score"]), 70.0)
+        payload["risk_level"] = "high" if payload["risk_level"] == "high" else "medium"
+        payload["action"] = "rate_limit"
+    return payload
+
 
 def decision_to_dict(decision: PipelineDecision) -> Dict[str, Any]:
     """Convert PipelineDecision to API response dict."""
-    return {
-        "id": f"evt-{int(time.time()*1000)}-{random.randint(1000,9999)}",
-        "timestamp": decision.feature_record.timestamp.isoformat() + "Z",
+    payload: dict[str, Any] = {
+        "id": _stable_event_id(decision.feature_record),
+        "timestamp": iso_utc(decision.feature_record.timestamp),
         "ip": decision.feature_record.ip,
         "rule_score": round(decision.rule_score, 2),
         "anomaly_score": round(decision.anomaly_score or 0.0, 3),
@@ -167,8 +258,165 @@ def decision_to_dict(decision: PipelineDecision) -> Dict[str, Any]:
         "repeat_incidents": decision.watchlist_entry.repeat_incidents,
         "adaptive_sensitivity": round(decision.watchlist_entry.adaptive_sensitivity, 3),
     }
+    return _apply_manual_override(payload, decision.feature_record.ip)
 
-# Connection Manager for WebSockets
+
+def _serialized_snapshot() -> list[dict[str, Any]]:
+    return [decision_to_dict(decision) for decision in _compute_snapshot_decisions()]
+
+
+def _ip_payloads(ip: str) -> list[dict[str, Any]]:
+    payloads = [payload for payload in _serialized_snapshot() if payload["ip"] == ip]
+    return sorted(payloads, key=lambda item: item["timestamp"], reverse=True)
+
+
+def _build_telemetry_points() -> list[dict[str, Any]]:
+    decisions = _compute_snapshot_decisions()
+    if not decisions:
+        return []
+
+    buckets: dict[datetime, dict[str, Any]] = {}
+    for decision in decisions:
+        timestamp = decision.feature_record.timestamp.replace(second=0, microsecond=0)
+        payload = decision_to_dict(decision)
+        bucket = buckets.setdefault(
+            timestamp,
+            {
+                "volume": 0,
+                "risk_total": 0.0,
+                "points": 0,
+                "active_ips": set(),
+            },
+        )
+        bucket["volume"] += decision.feature_record.event_count
+        bucket["risk_total"] += float(payload["risk_score"])
+        bucket["points"] += 1
+        bucket["active_ips"].add(decision.feature_record.ip)
+
+    points: list[dict[str, Any]] = []
+    for timestamp, bucket in sorted(buckets.items()):
+        volume = int(bucket["volume"])
+        avg_risk = round(bucket["risk_total"] / max(bucket["points"], 1), 2)
+        points.append(
+            {
+                "time": timestamp.strftime("%H:%M"),
+                "timestamp": iso_utc(timestamp),
+                "volume": volume,
+                "risk": avg_risk,
+                "event_rate_per_sec": round(volume / 60.0, 3),
+                "active_ips": len(bucket["active_ips"]),
+            }
+        )
+    return points
+
+
+def _build_debug_payload() -> dict[str, Any]:
+    telemetry = _build_telemetry_points()
+    latest_point = telemetry[-1] if telemetry else None
+    decisions = _serialized_snapshot()
+    return {
+        "backend_started_at": iso_utc(backend_started_at),
+        "model_loaded": anomaly_model is not None,
+        "records_loaded": len(real_feature_records),
+        "parsed_events_loaded": len(parsed_auth_events),
+        "unique_ips": len({record.ip for record in real_feature_records}),
+        "active_connections": len(manager.active_connections),
+        "total_connections": runtime_stats.total_connections,
+        "total_disconnects": runtime_stats.total_disconnects,
+        "total_batches_sent": runtime_stats.total_batches_sent,
+        "total_events_sent": runtime_stats.total_events_sent,
+        "broadcast_errors": runtime_stats.broadcast_errors,
+        "stream_position": _stream_position,
+        "last_batch_at": iso_utc(runtime_stats.last_batch_at) if runtime_stats.last_batch_at else None,
+        "event_rate_per_sec": latest_point["event_rate_per_sec"] if latest_point else 0.0,
+        "latest_volume": latest_point["volume"] if latest_point else 0,
+        "latest_risk": latest_point["risk"] if latest_point else 0.0,
+        "manual_overrides": {ip: _serialize_override(override) for ip, override in manual_overrides.items()},
+        "decision_count": len(decisions),
+    }
+
+
+def _build_report_index() -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
+    decisions = _serialized_snapshot()
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for payload in decisions:
+        report_date = payload["timestamp"][:10]
+        grouped[report_date].append(payload)
+
+    summaries: list[dict[str, Any]] = []
+    details: dict[str, dict[str, Any]] = {}
+
+    for report_date, payloads in sorted(grouped.items(), reverse=True):
+        report_id = f"daily-{report_date.replace('-', '')}"
+        unique_ips = sorted({payload["ip"] for payload in payloads})
+        high_count = sum(1 for payload in payloads if payload["risk_level"] == "high")
+        medium_count = sum(1 for payload in payloads if payload["risk_level"] == "medium")
+        incident_count = high_count + medium_count
+        top_events = sorted(payloads, key=lambda item: item["risk_score"], reverse=True)[:10]
+
+        summary = {
+            "id": report_id,
+            "date": report_date,
+            "label": report_date,
+            "status": "Ready",
+            "incident_count": incident_count,
+            "high_risk_count": high_count,
+            "medium_risk_count": medium_count,
+            "baseline_count": sum(1 for payload in payloads if payload["risk_level"] in {"low", "normal"}),
+            "unique_ip_count": len(unique_ips),
+            "generated_at": iso_utc(utc_now()),
+        }
+        detail = {
+            **summary,
+            "unique_ips": unique_ips,
+            "top_events": top_events,
+            "manual_overrides": {ip: _serialize_override(override) for ip, override in manual_overrides.items()},
+        }
+        summaries.append(summary)
+        details[report_id] = detail
+
+    return summaries, details
+
+
+def _render_report_pdf(report: dict[str, Any]) -> bytes:
+    fig = plt.figure(figsize=(8.27, 11.69))
+    gs = fig.add_gridspec(2, 1, height_ratios=[1.2, 1.0])
+    summary_ax = fig.add_subplot(gs[0])
+    chart_ax = fig.add_subplot(gs[1])
+
+    summary_ax.axis("off")
+    lines = [
+        "Hybrid SIEM Daily Report",
+        f"Report ID: {report['id']}",
+        f"Date: {report['date']}",
+        f"Generated: {report['generated_at']}",
+        f"Unique IPs: {report['unique_ip_count']}",
+        f"Incidents (medium/high): {report['incident_count']}",
+        f"High Risk: {report['high_risk_count']}",
+        f"Medium Risk: {report['medium_risk_count']}",
+        f"Baseline: {report['baseline_count']}",
+        "",
+        "Top IPs:",
+    ]
+    lines.extend([f"- {event['ip']} ({event['action']}, risk={event['risk_score']})" for event in report["top_events"][:5]])
+    summary_ax.text(0.02, 0.98, "\n".join(lines), va="top", ha="left", family="monospace", fontsize=10)
+
+    labels = ["High", "Medium", "Baseline"]
+    values = [report["high_risk_count"], report["medium_risk_count"], report["baseline_count"]]
+    colors = ["#ef4444", "#f59e0b", "#60a5fa"]
+    chart_ax.bar(labels, values, color=colors)
+    chart_ax.set_title("Risk Distribution")
+    chart_ax.set_ylabel("Window Count")
+    chart_ax.grid(axis="y", alpha=0.2)
+
+    buffer = io.BytesIO()
+    fig.tight_layout()
+    fig.savefig(buffer, format="pdf")
+    plt.close(fig)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
 class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
@@ -176,56 +424,61 @@ class ConnectionManager:
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections.append(websocket)
+        runtime_stats.total_connections += 1
 
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
+            runtime_stats.total_disconnects += 1
 
     async def broadcast(self, message: Any):
         disconnected = []
+        batch_size = len(message.get("data", [])) if isinstance(message, dict) else 0
+        runtime_stats.total_batches_sent += 1
+        runtime_stats.total_events_sent += batch_size
+        runtime_stats.last_batch_at = utc_now()
+
         for connection in self.active_connections:
             try:
                 await connection.send_json(message)
             except Exception:
+                runtime_stats.broadcast_errors += 1
                 disconnected.append(connection)
-        for conn in disconnected:
-            self.disconnect(conn)
+
+        for connection in disconnected:
+            self.disconnect(connection)
+
 
 manager = ConnectionManager()
 
-# Background task to stream real events
+
 async def event_generator():
     """Continuously stream PipelineDecision events from real data."""
     while True:
-        await asyncio.sleep(2)  # 2 seconds interval
-        if manager.active_connections and anomaly_model:
-            # Get batch of records (real or fallback)
-            batch_size = random.randint(1, 3)
-            records = get_real_or_fallback_records(batch_size)
-            
-            # Get anomaly scores
-            anomaly_scores = anomaly_model.score_lookup(records)
-            
-            # Process through pipeline
-            try:
-                decisions = process_feature_records(
-                    records=records,
-                    weights=weights,
-                    anomaly_scores=anomaly_scores,
-                )
-                
-                payload = [decision_to_dict(d) for d in decisions]
-                await manager.broadcast({
+        await asyncio.sleep(2)
+        if not manager.active_connections:
+            continue
+
+        records = get_stream_records(count=2)
+        if not records:
+            continue
+
+        try:
+            decisions = _score_records(records, watchlist=stream_watchlist)
+            payload = [decision_to_dict(decision) for decision in decisions]
+            await manager.broadcast(
+                {
                     "type": "events_batch",
                     "data": payload,
-                    "timestamp": datetime.utcnow().isoformat() + "Z"
-                })
-            except Exception as e:
-                print(f"[WARN] Error processing records: {e}")
+                    "timestamp": iso_utc(utc_now()),
+                }
+            )
+        except Exception as exc:
+            print(f"[WARN] Error processing records: {exc}")
+
 
 @app.on_event("startup")
 async def startup_event():
-    """Load real data and start event streaming."""
     load_real_data()
     asyncio.create_task(event_generator())
 
@@ -235,212 +488,243 @@ async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for real-time event streaming."""
     await manager.connect(websocket)
     try:
-        # Send initial batch of real data
-        if anomaly_model and real_feature_records:
-            initial_records = get_real_or_fallback_records(10)
-            anomaly_scores = anomaly_model.score_lookup(initial_records)
-            
-            initial_decisions = process_feature_records(
-                records=initial_records,
-                weights=weights,
-                anomaly_scores=anomaly_scores,
+        if anomaly_model is not None and real_feature_records:
+            initial_records = get_stream_records(min(10, len(real_feature_records)))
+            initial_decisions = _score_records(initial_records, watchlist=WatchlistManager())
+            initial_payload = [decision_to_dict(decision) for decision in initial_decisions]
+            await websocket.send_json(
+                {
+                    "type": "initial_batch",
+                    "data": initial_payload,
+                    "timestamp": iso_utc(utc_now()),
+                }
             )
-            
-            initial_payload = [decision_to_dict(d) for d in initial_decisions]
-            await websocket.send_json({
-                "type": "initial_batch",
-                "data": initial_payload,
-                "timestamp": datetime.utcnow().isoformat() + "Z"
-            })
-        
-        # Keep connection open
+
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
-    except Exception as e:
-        print(f"[WARN] WebSocket error: {e}")
+    except Exception as exc:
+        print(f"[WARN] WebSocket error: {exc}")
         manager.disconnect(websocket)
 
 
-# REST endpoints for other data
+@app.post("/api/actions/block-ip")
+async def block_ip(request: BlockIPRequest):
+    manual_overrides[request.ip] = PolicyOverride(
+        ip=request.ip,
+        action="block",
+        reason=request.reason or "Blocked from dashboard",
+        source=request.source,
+        created_at=utc_now(),
+    )
+    return {
+        "ok": True,
+        "ip": request.ip,
+        "override": _serialize_override(manual_overrides[request.ip]),
+    }
+
+
+@app.post("/api/actions/enforce-policy")
+async def enforce_policy(request: EnforcePolicyRequest):
+    if request.action == "monitor":
+        removed = manual_overrides.pop(request.ip, None)
+        return {
+            "ok": True,
+            "ip": request.ip,
+            "cleared": removed is not None,
+            "action": "monitor",
+        }
+
+    manual_overrides[request.ip] = PolicyOverride(
+        ip=request.ip,
+        action=request.action,
+        reason=request.reason or "Policy enforced from dashboard",
+        source=request.source,
+        created_at=utc_now(),
+    )
+    return {
+        "ok": True,
+        "ip": request.ip,
+        "override": _serialize_override(manual_overrides[request.ip]),
+    }
+
+
 @app.get("/api/metrics")
 async def get_metrics():
-    """Get system-wide metrics based on real data."""
-    if not anomaly_model or not real_feature_records:
-        # Fallback
-        high = random.randint(15, 45)
-        elevated = random.randint(60, 110)
-        baseline = random.randint(180, 280)
-        total = high + elevated + baseline
-        risk_score = (high / total) * 100
+    payloads = _serialized_snapshot()
+    high = sum(1 for payload in payloads if payload["risk_level"] == "high")
+    elevated = sum(1 for payload in payloads if payload["risk_level"] == "medium")
+    baseline = sum(1 for payload in payloads if payload["risk_level"] in ("low", "normal"))
+    total = len(payloads)
+
+    if total == 0:
         return {
-            "status": "CRITICAL" if risk_score > 15 else ("ELEVATED" if risk_score > 10 else "NOMINAL"),
-            "events_24h": f"{(random.randint(900, 1400) / 1000):.2f}B",
-            "events_trend": round(random.uniform(-5, 25), 1),
-            "active_suspicious_ips": total,
-            "critical_nodes_isolated": high,
-            "high_risk_count": high,
-            "elevated_anomaly_count": elevated,
-            "baseline_count": baseline,
+            "status": "NOMINAL",
+            "events_24h": "0",
+            "events_trend": 0.0,
+            "active_suspicious_ips": 0,
+            "critical_nodes_isolated": 0,
+            "high_risk_count": 0,
+            "elevated_anomaly_count": 0,
+            "baseline_count": 0,
         }
-    
-    # Real data analysis
-    try:
-        anomaly_scores = anomaly_model.score_lookup(real_feature_records)
-        decisions = process_feature_records(
-            records=real_feature_records,
-            weights=weights,
-            anomaly_scores=anomaly_scores,
-        )
-        
-        high = sum(1 for d in decisions if d.risk_level == 'high')
-        elevated = sum(1 for d in decisions if d.risk_level == 'medium')
-        baseline = sum(1 for d in decisions if d.risk_level in ('low', 'normal'))
-        total = len(decisions)
-        
-        return {
-            "status": "CRITICAL" if high / max(total, 1) > 0.15 else ("ELEVATED" if elevated / max(total, 1) > 0.10 else "NOMINAL"),
-            "events_24h": f"{total/1000:.2f}B",
-            "events_trend": round((high / max(total, 1)) * 100, 1),
-            "active_suspicious_ips": len(set(d.feature_record.ip for d in decisions)),
-            "critical_nodes_isolated": high,
-            "high_risk_count": high,
-            "elevated_anomaly_count": elevated,
-            "baseline_count": baseline,
-        }
-    except Exception as e:
-        print(f"[WARN] Error computing metrics: {e}")
-        return {"status": "ERROR", "error": str(e)}
+
+    if high / total > 0.15:
+        status = "CRITICAL"
+    elif elevated / total > 0.10:
+        status = "ELEVATED"
+    else:
+        status = "NOMINAL"
+
+    return {
+        "status": status,
+        "events_24h": str(total),
+        "events_trend": 0.0,
+        "active_suspicious_ips": len({payload["ip"] for payload in payloads}),
+        "critical_nodes_isolated": high,
+        "high_risk_count": high,
+        "elevated_anomaly_count": elevated,
+        "baseline_count": baseline,
+    }
+
 
 @app.get("/api/network-nodes")
 async def get_network_nodes():
-    """Get network nodes from real data."""
-    if not anomaly_model or not real_feature_records:
-        # Fallback
-        SUSPICIOUS_IPS = [
-            '203.0.113.45', '185.220.101.12', '45.33.32.156', '198.51.100.77',
-            '91.108.4.200',  '162.158.92.10',  '104.21.16.35',  '172.67.200.4',
-            '77.88.55.60',   '8.8.8.8', '185.15.58.22', '210.10.5.44',
-        ]
-        COUNTRIES = ['RU', 'CN', 'US', 'KR', 'DE', 'NL', 'BR', 'ID', 'IN', 'UA']
-        nodes = []
-        for i in range(10):
-            score = round(random.uniform(0, 100), 1)
-            level = "high" if score >= 85 else ("medium" if score >= 65 else ("low" if score >= 40 else "normal"))
-            action = "block" if level == "high" else ("rate_limit" if level == "medium" else "monitor")
-            
-            nodes.append({
-                "id": f"node-{i}",
-                "ip": random.choice(SUSPICIOUS_IPS),
-                "risk_level": level,
-                "risk_score": score,
-                "action": action,
-                "event_count": random.randint(1, 50),
-                "label": f"Node-{str(i+1).zfill(2)}",
-                "country": random.choice(COUNTRIES)
-            })
-        return nodes
-    
-    # Real data: group by IP
-    try:
-        anomaly_scores = anomaly_model.score_lookup(real_feature_records)
-        decisions = process_feature_records(
-            records=real_feature_records,
-            weights=weights,
-            anomaly_scores=anomaly_scores,
+    payloads = _serialized_snapshot()
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for payload in payloads:
+        ip = payload["ip"]
+        stats = grouped.setdefault(
+            ip,
+            {
+                "risk_scores": [],
+                "actions": [],
+                "event_count": 0,
+                "risk_level": "normal",
+            },
         )
-        
-        # Aggregate by IP
-        ip_stats: Dict[str, Dict[str, Any]] = {}
-        for d in decisions:
-            ip = d.feature_record.ip
-            if ip not in ip_stats:
-                ip_stats[ip] = {
-                    "risk_scores": [],
-                    "actions": [],
-                    "event_count": 0,
-                    "risk_level": "normal"
-                }
-            ip_stats[ip]["risk_scores"].append(d.risk_score)
-            ip_stats[ip]["actions"].append(d.action)
-            ip_stats[ip]["event_count"] += 1
-        
-        # Convert to nodes
-        nodes = []
-        COUNTRIES = ['RU', 'CN', 'US', 'KR', 'DE', 'NL', 'BR', 'ID', 'IN', 'UA']
-        for i, (ip, stats) in enumerate(list(ip_stats.items())[:10]):
-            avg_risk = sum(stats["risk_scores"]) / len(stats["risk_scores"])
-            most_severe_action = "block" if "block" in stats["actions"] else ("rate_limit" if "rate_limit" in stats["actions"] else "monitor")
-            
-            risk_level = "high" if avg_risk >= 85 else ("medium" if avg_risk >= 65 else ("low" if avg_risk >= 40 else "normal"))
-            
-            nodes.append({
-                "id": f"node-{i}",
+        stats["risk_scores"].append(payload["risk_score"])
+        stats["actions"].append(payload["action"])
+        stats["event_count"] += 1
+        if payload["risk_level"] == "high" or (payload["risk_level"] == "medium" and stats["risk_level"] != "high"):
+            stats["risk_level"] = payload["risk_level"]
+
+    nodes = []
+    for index, (ip, stats) in enumerate(sorted(grouped.items(), key=lambda item: sum(item[1]["risk_scores"]) / len(item[1]["risk_scores"]), reverse=True)[:10]):
+        avg_risk = sum(stats["risk_scores"]) / max(len(stats["risk_scores"]), 1)
+        action = "block" if "block" in stats["actions"] else ("rate_limit" if "rate_limit" in stats["actions"] else "monitor")
+        nodes.append(
+            {
+                "id": f"node-{index}",
                 "ip": ip,
-                "risk_level": risk_level,
+                "risk_level": stats["risk_level"],
                 "risk_score": round(avg_risk, 1),
-                "action": most_severe_action,
+                "action": action,
                 "event_count": stats["event_count"],
-                "label": f"IP-{ip.split('.')[-1]}",
-                "country": random.choice(COUNTRIES)
-            })
-        
-        return nodes
-    except Exception as e:
-        print(f"[WARN] Error computing network nodes: {e}")
-        return []
+                "label": ip,
+                "country": "UNK",
+            }
+        )
+    return nodes
+
 
 @app.get("/api/hunting-results")
 async def get_hunting_results():
-    """Get threat hunting results from real data."""
-    if not anomaly_model or not real_feature_records:
-        # Fallback
-        records = [generate_random_feature_record() for _ in range(15)]
-        decisions = process_feature_records(
-            records, 
-            weights=weights,
-            anomaly_scores={ (r.ip, r.timestamp): random.uniform(0.1, 0.9) for r in records }
-        )
-        
-        results = []
-        for d in decisions:
-            res = decision_to_dict(d)
-            res["first_seen"] = (datetime.utcnow() - timedelta(hours=random.randint(1, 72))).isoformat() + "Z"
-            res["last_seen"] = res["timestamp"]
-            results.append(res)
-            
-        results.sort(key=lambda x: x["risk_score"], reverse=True)
-        return results
-    
-    # Real data hunting results
-    try:
-        anomaly_scores = anomaly_model.score_lookup(real_feature_records)
-        decisions = process_feature_records(
-            records=real_feature_records,
-            weights=weights,
-            anomaly_scores=anomaly_scores,
-        )
-        
-        results = []
-        ip_first_seen: Dict[str, datetime] = {}
-        
-        for d in decisions:
-            ip = d.feature_record.ip
-            if ip not in ip_first_seen:
-                ip_first_seen[ip] = d.feature_record.timestamp
-            
-            res = decision_to_dict(d)
-            res["first_seen"] = ip_first_seen[ip].isoformat() + "Z"
-            res["last_seen"] = d.feature_record.timestamp.isoformat() + "Z"
-            results.append(res)
-        
-        results.sort(key=lambda x: x["risk_score"], reverse=True)
-        return results[:50]  # Limit to top 50
-    except Exception as e:
-        print(f"[WARN] Error computing hunting results: {e}")
+    results = _serialized_snapshot()
+    if not results:
         return []
+
+    first_seen_by_ip: dict[str, str] = {}
+    enriched: list[dict[str, Any]] = []
+    for payload in sorted(results, key=lambda item: item["timestamp"]):
+        ip = payload["ip"]
+        first_seen_by_ip.setdefault(ip, payload["timestamp"])
+        enriched.append(
+            {
+                **payload,
+                "first_seen": first_seen_by_ip[ip],
+                "last_seen": payload["timestamp"],
+            }
+        )
+    return sorted(enriched, key=lambda item: item["risk_score"], reverse=True)[:50]
+
+
+@app.get("/api/ip/{ip}/history")
+async def get_ip_history(ip: str):
+    payloads = _ip_payloads(ip)
+    return {
+        "ip": ip,
+        "history": payloads,
+        "manual_override": _serialize_override(manual_overrides[ip]) if ip in manual_overrides else None,
+    }
+
+
+@app.get("/api/ip/{ip}/timeline")
+async def get_ip_timeline(ip: str):
+    payloads = list(reversed(_ip_payloads(ip)))
+    points = [
+        {
+            "id": payload["id"],
+            "timestamp": payload["timestamp"],
+            "risk_score": payload["risk_score"],
+            "rule_score": payload["rule_score"],
+            "anomaly_score": payload["anomaly_score"],
+            "action": payload["action"],
+            "risk_level": payload["risk_level"],
+            "event_count": payload["event_count"],
+            "failed_count": payload["failed_count"],
+            "request_rate": payload["request_rate"],
+            "username_variance": payload["username_variance"],
+            "failed_ratio": payload["failed_ratio"],
+        }
+        for payload in payloads
+    ]
+    return {
+        "ip": ip,
+        "timeline": points,
+        "manual_override": _serialize_override(manual_overrides[ip]) if ip in manual_overrides else None,
+    }
+
+
+@app.get("/api/telemetry")
+async def get_telemetry():
+    return _build_telemetry_points()
+
+
+@app.get("/api/debug")
+async def get_debug():
+    return _build_debug_payload()
+
+
+@app.get("/api/reports")
+async def get_reports():
+    summaries, _ = _build_report_index()
+    return summaries
+
+
+@app.get("/api/reports/{report_id}.json")
+async def get_report_json(report_id: str):
+    _, details = _build_report_index()
+    report = details.get(report_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return report
+
+
+@app.get("/api/reports/{report_id}.pdf")
+async def get_report_pdf(report_id: str):
+    _, details = _build_report_index()
+    report = details.get(report_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    pdf_bytes = _render_report_pdf(report)
+    headers = {"Content-Disposition": f'attachment; filename="{report_id}.pdf"'}
+    return Response(content=pdf_bytes, media_type="application/pdf", headers=headers)
+
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run("hybrid_siem.api:app", host="127.0.0.1", port=8001, reload=True)

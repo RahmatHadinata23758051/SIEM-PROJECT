@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { ShieldCheck, Lock, User, ArrowRight } from 'lucide-react';
 import { cn } from '../lib/utils';
+import { API_BASE_URL } from '../lib/api';
 
 interface LoginProps {
   onLogin: (token: string) => void;
@@ -18,7 +19,7 @@ export default function Login({ onLogin }: LoginProps) {
     setLoading(true);
 
     try {
-      const res = await fetch('http://localhost:8001/api/auth/login', {
+      const res = await fetch(`${API_BASE_URL}/api/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password })

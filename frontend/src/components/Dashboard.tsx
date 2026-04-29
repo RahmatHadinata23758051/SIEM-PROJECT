@@ -1,41 +1,31 @@
 import React, { useEffect, useRef } from 'react';
-import { Shield, Activity, Target, Zap, MoreHorizontal, Terminal, ShieldX } from 'lucide-react';
-import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { Activity, ShieldX, Target, Terminal, Zap } from 'lucide-react';
+import { Area, AreaChart, ResponsiveContainer, Tooltip, XAxis } from 'recharts';
 import { motion } from 'motion/react';
 import { cn } from '../lib/utils';
+import { formatLogLine } from '../lib/api';
 import { useSIEMStream } from '../hooks/useSIEMStream';
-import { formatLogLine, type SIEMEvent } from '../lib/api';
-
-// ─── Dashboard ────────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
-  const { events, metrics, telemetry, isStreaming, setStreaming, clearEvents } = useSIEMStream();
-
+  const { events, metrics, telemetry, debug, isStreaming, setStreaming, clearEvents } = useSIEMStream();
   const streamRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll live stream to top (newest entry)
   useEffect(() => {
     if (streamRef.current) {
       streamRef.current.scrollTop = 0;
     }
   }, [events]);
 
-  const statusVariant = metrics.status === 'CRITICAL' ? 'error'
-    : metrics.status === 'ELEVATED'  ? 'warning'
-    : undefined;
-
-  const trendLabel = metrics.events_trend >= 0
-    ? `+${metrics.events_trend}% vs yesterday`
-    : `${metrics.events_trend}% vs yesterday`;
+  const statusVariant = metrics.status === 'CRITICAL' ? 'error' : metrics.status === 'ELEVATED' ? 'warning' : undefined;
+  const trendLabel = metrics.events_trend >= 0 ? `+${metrics.events_trend}% vs previous window` : `${metrics.events_trend}% vs previous window`;
 
   const total = metrics.high_risk_count + metrics.elevated_anomaly_count + metrics.baseline_count;
-  const pctHigh     = total ? Math.round((metrics.high_risk_count          / total) * 100) : 8;
-  const pctElevated = total ? Math.round((metrics.elevated_anomaly_count   / total) * 100) : 24;
-  const pctBaseline = total ? Math.round((metrics.baseline_count           / total) * 100) : 68;
+  const pctHigh = total ? Math.round((metrics.high_risk_count / total) * 100) : 0;
+  const pctElevated = total ? Math.round((metrics.elevated_anomaly_count / total) * 100) : 0;
+  const pctBaseline = total ? Math.round((metrics.baseline_count / total) * 100) : 0;
 
   return (
     <div className="p-6 flex flex-col gap-6 h-full overflow-y-auto">
-      {/* Page Header */}
       <header className="flex justify-between items-end pb-4 border-b border-outline-variant/30">
         <div>
           <h1 className="text-2xl font-bold text-on-surface">Dashboard Overview</h1>
@@ -45,16 +35,12 @@ export default function Dashboard() {
           onClick={() => setStreaming(!isStreaming)}
           className="flex items-center gap-2 text-on-surface-variant font-mono text-xs hover:text-on-surface transition-colors"
         >
-          <span className={cn(
-            'w-2 h-2 rounded-full',
-            isStreaming ? 'bg-emerald-500 animate-pulse' : 'bg-outline-variant'
-          )} />
+          <span className={cn('w-2 h-2 rounded-full', isStreaming ? 'bg-emerald-500 animate-pulse' : 'bg-outline-variant')} />
           {isStreaming ? 'Live Sync' : 'Paused'}
         </button>
       </header>
 
-      {/* Metrics Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
         <MetricCard
           title="System Status"
           value={metrics.status}
@@ -63,7 +49,7 @@ export default function Dashboard() {
           variant={statusVariant}
         />
         <MetricCard
-          title="Events Processed (24h)"
+          title="Events Processed"
           value={metrics.events_24h}
           subtitle={trendLabel}
           icon={<Activity className="text-primary w-10 h-10" />}
@@ -76,22 +62,26 @@ export default function Dashboard() {
           icon={<Target className="text-error w-10 h-10" />}
           variant="warning"
         />
+        <MetricCard
+          title="Event Rate"
+          value={`${debug.event_rate_per_sec.toFixed(3)}/s`}
+          subtitle={`${debug.active_connections} ws clients`}
+          icon={<Terminal className="text-tertiary w-10 h-10" />}
+        />
       </div>
 
-      {/* Middle Row */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 flex-1 min-h-[400px]">
-        {/* Risk Distribution */}
         <div className="lg:col-span-4 bg-surface-container border border-outline-variant/30 rounded-xl flex flex-col">
           <div className="p-4 border-b border-outline-variant/30 flex justify-between items-center">
             <h3 className="font-semibold text-on-surface">Risk Distribution</h3>
-            <button className="text-on-surface-variant hover:text-on-surface transition-colors">
-              <MoreHorizontal size={18} />
-            </button>
+            <div className="text-[10px] uppercase tracking-widest font-bold text-on-surface-variant">
+              {debug.records_loaded} records
+            </div>
           </div>
           <div className="p-6 flex flex-col gap-6">
-            <RiskItem label="High Risk Nodes"      percentage={pctHigh}     count={metrics.high_risk_count}         color="bg-error" />
-            <RiskItem label="Elevated Anomalies"   percentage={pctElevated} count={metrics.elevated_anomaly_count}  color="bg-tertiary" />
-            <RiskItem label="Baseline Operations"  percentage={pctBaseline} count={metrics.baseline_count}          color="bg-primary" />
+            <RiskItem label="High Risk Nodes" percentage={pctHigh} count={metrics.high_risk_count} color="bg-error" />
+            <RiskItem label="Elevated Anomalies" percentage={pctElevated} count={metrics.elevated_anomaly_count} color="bg-tertiary" />
+            <RiskItem label="Baseline Operations" percentage={pctBaseline} count={metrics.baseline_count} color="bg-primary" />
           </div>
           <div className="mt-auto p-4 border-t border-outline-variant/30 h-40">
             <h4 className="text-xs font-semibold text-on-surface-variant uppercase tracking-wider mb-2">Telemetry Volume</h4>
@@ -111,7 +101,6 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* Live Event Stream */}
         <div className="lg:col-span-8 bg-surface-container border border-outline-variant/30 rounded-xl flex flex-col">
           <div className="p-4 border-b border-outline-variant/30 bg-surface-container-low/50 flex justify-between items-center">
             <h3 className="font-semibold text-on-surface flex items-center gap-2">
@@ -126,7 +115,7 @@ export default function Dashboard() {
                 Clear
               </button>
               <div className="bg-surface-container-highest px-2 py-0.5 rounded text-[10px] font-bold text-on-surface-variant uppercase tracking-widest">
-                {isStreaming ? 'Auto-Scroll On' : 'Stream Paused'}
+                {isStreaming ? 'Live Stream' : 'Stream Paused'}
               </div>
             </div>
           </div>
@@ -134,7 +123,7 @@ export default function Dashboard() {
             ref={streamRef}
             className="h-[450px] bg-surface-container-lowest/80 p-4 overflow-y-auto font-mono text-xs space-y-2 scrollbar-thin scrollbar-thumb-outline-variant/30 scrollbar-track-transparent"
           >
-            {events.map(event => {
+            {events.map((event) => {
               const line = formatLogLine(event);
               return (
                 <LogEntry
@@ -154,11 +143,20 @@ export default function Dashboard() {
   );
 }
 
-// ─── Sub-components (layout & className unchanged) ────────────────────────────
-
-function MetricCard({ title, value, subtitle, icon, trend, variant }: {
-  title: string; value: string; subtitle: string; icon: React.ReactNode;
-  trend?: 'up' | 'down'; variant?: 'error' | 'warning';
+function MetricCard({
+  title,
+  value,
+  subtitle,
+  icon,
+  trend,
+  variant,
+}: {
+  title: string;
+  value: string;
+  subtitle: string;
+  icon: React.ReactNode;
+  trend?: 'up' | 'down';
+  variant?: 'error' | 'warning';
 }) {
   return (
     <div className="bg-surface-container border border-outline-variant/30 rounded-xl p-6 flex flex-col justify-between shadow-lg relative overflow-hidden group">
@@ -166,9 +164,6 @@ function MetricCard({ title, value, subtitle, icon, trend, variant }: {
 
       <div className="flex justify-between items-start z-10">
         <h3 className="text-sm font-semibold text-on-surface-variant uppercase tracking-wider">{title}</h3>
-        <button className="text-on-surface-variant/50 hover:text-on-surface transition-colors">
-          <MoreHorizontal size={16} />
-        </button>
       </div>
 
       <div className="mt-8 flex items-end gap-6 z-10 transition-transform duration-300 group-hover:translate-x-1">
@@ -190,7 +185,9 @@ function RiskItem({ label, percentage, count, color }: { label: string; percenta
     <div>
       <div className="flex justify-between text-sm mb-2">
         <span className={cn('font-semibold', color.replace('bg-', 'text-'))}>{label}</span>
-        <span className="text-on-surface-variant font-mono">{percentage}% ({count})</span>
+        <span className="text-on-surface-variant font-mono">
+          {percentage}% ({count})
+        </span>
       </div>
       <div className="h-1.5 w-full bg-surface-container-highest rounded-full overflow-hidden">
         <motion.div
@@ -204,14 +201,21 @@ function RiskItem({ label, percentage, count, color }: { label: string; percenta
   );
 }
 
-function LogEntry({ time, level, message, color = 'text-on-surface-variant', isCritical }: {
-  time: string; level: string; message: string; color?: string; isCritical?: boolean;
+function LogEntry({
+  time,
+  level,
+  message,
+  color = 'text-on-surface-variant',
+  isCritical,
+}: {
+  time: string;
+  level: string;
+  message: string;
+  color?: string;
+  isCritical?: boolean;
 }) {
   return (
-    <div className={cn(
-      'flex gap-4 px-2 py-1.5 rounded transition-all group cursor-default',
-      isCritical ? 'bg-error/10 border border-error/20' : 'hover:bg-surface-container-highest/50',
-    )}>
+    <div className={cn('flex gap-4 px-2 py-1.5 rounded transition-all group cursor-default', isCritical ? 'bg-error/10 border border-error/20' : 'hover:bg-surface-container-highest/50')}>
       <span className="text-on-surface-variant/40 w-20 shrink-0 select-none">{time}</span>
       <span className={cn('shrink-0 w-12 font-bold', isCritical ? 'text-error' : 'text-primary')}>[{level}]</span>
       <span className={cn('break-all', isCritical ? 'font-medium' : color)}>{message}</span>

@@ -1,70 +1,83 @@
-import React, { useMemo } from 'react';
-import { getHuntingResults } from '../lib/api';
-import { BrainCircuit, Activity, Crosshair, ShieldCheck, PieChart as PieChartIcon } from 'lucide-react';
-import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar, Legend } from 'recharts';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Activity, BrainCircuit, Crosshair, PieChart as PieChartIcon, ShieldCheck } from 'lucide-react';
+import { Cell, Legend, Pie, PieChart, PolarAngleAxis, PolarGrid, PolarRadiusAxis, Radar, RadarChart, ResponsiveContainer, Tooltip } from 'recharts';
+import { fetchHuntingResultsAsync, type HuntingResult } from '../lib/api';
+import { useSIEMStream } from '../hooks/useSIEMStream';
 
 export default function AIInsights() {
-  const results = useMemo(() => getHuntingResults(15), []);
+  const { events, debug } = useSIEMStream();
+  const [fallbackResults, setFallbackResults] = useState<HuntingResult[]>([]);
+
+  useEffect(() => {
+    if (events.length > 0) return;
+    let cancelled = false;
+    fetchHuntingResultsAsync()
+      .then((results) => {
+        if (!cancelled) {
+          setFallbackResults(results);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setFallbackResults([]);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [events.length]);
+
+  const results = useMemo<HuntingResult[]>(() => {
+    if (events.length > 0) {
+      return events.map((event) => ({
+        ...event,
+        first_seen: event.timestamp,
+        last_seen: event.timestamp,
+      }));
+    }
+    return fallbackResults;
+  }, [events, fallbackResults]);
 
   const total = results.length;
   const methodStats = useMemo(() => {
-    const counts = results.reduce((acc, r) => {
-      acc[r.scoring_method] = (acc[r.scoring_method] || 0) + 1;
-      return acc;
+    const counts = results.reduce((accumulator, result) => {
+      accumulator[result.scoring_method] = (accumulator[result.scoring_method] || 0) + 1;
+      return accumulator;
     }, {} as Record<string, number>);
     return Object.entries(counts).map(([name, value]) => ({ name, value }));
   }, [results]);
 
-  const COLORS = ['#adc6ff', '#5c8aff', '#ffb4ab', '#10b981'];
+  const radarData = useMemo(
+    () =>
+      results.slice(0, 5).map((result) => ({
+        ip: result.ip,
+        rule: result.rule_score,
+        anomaly: result.anomaly_score * 100,
+        risk: result.risk_score,
+      })),
+    [results],
+  );
 
-  const radarData = useMemo(() => {
-    return results.slice(0, 5).map(r => ({
-      ip: r.ip,
-      rule: r.rule_score,
-      anomaly: r.anomaly_score * 100,
-      risk: r.risk_score,
-    }));
-  }, [results]);
+  const COLORS = ['#adc6ff', '#5c8aff', '#ffb4ab', '#10b981'];
+  const avgAnomaly = total ? Math.round((results.reduce((sum, result) => sum + result.anomaly_score, 0) / total) * 100) : 0;
 
   return (
     <div className="p-6 flex flex-col gap-6 h-full overflow-y-auto">
       <header className="flex justify-between items-end pb-4 border-b border-outline-variant/30">
         <div>
           <h1 className="text-2xl font-bold text-on-surface">AI Decision Insights</h1>
-          <p className="text-sm text-on-surface-variant mt-1">Aggregated scoring analytics from the Machine Learning pipeline.</p>
+          <p className="text-sm text-on-surface-variant mt-1">Aggregated scoring analytics from the live hybrid detection pipeline.</p>
         </div>
       </header>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        <div className="bg-surface-container border border-outline-variant/30 rounded-xl p-6">
-          <div className="flex items-center gap-3 text-primary mb-2">
-            <BrainCircuit />
-            <h3 className="font-bold">Total Models Evaluated</h3>
-          </div>
-          <p className="text-4xl font-black text-on-surface">{total}</p>
-        </div>
-        <div className="bg-surface-container border border-outline-variant/30 rounded-xl p-6">
-          <div className="flex items-center gap-3 text-tertiary mb-2">
-            <Activity />
-            <h3 className="font-bold">Avg Anomaly Confidence</h3>
-          </div>
-          <p className="text-4xl font-black text-on-surface">
-            {Math.round(results.reduce((a, b) => a + b.anomaly_score, 0) / total * 100)}%
-          </p>
-        </div>
-        <div className="bg-surface-container border border-outline-variant/30 rounded-xl p-6">
-          <div className="flex items-center gap-3 text-error mb-2">
-            <Crosshair />
-            <h3 className="font-bold">High Risk Detections</h3>
-          </div>
-          <p className="text-4xl font-black text-on-surface">
-            {results.filter(r => r.risk_level === 'high').length}
-          </p>
-        </div>
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+        <InsightCard icon={<BrainCircuit />} title="Tracked Decisions" value={String(total)} tone="primary" />
+        <InsightCard icon={<Activity />} title="Avg Anomaly Confidence" value={`${avgAnomaly}%`} tone="tertiary" />
+        <InsightCard icon={<Crosshair />} title="High Risk Detections" value={String(results.filter((result) => result.risk_level === 'high').length)} tone="error" />
+        <InsightCard icon={<ShieldCheck />} title="Model Loaded" value={debug.model_loaded ? 'YES' : 'NO'} tone={debug.model_loaded ? 'primary' : 'error'} />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 h-[400px]">
-        {/* Pie Chart: Scoring Methods */}
         <div className="bg-surface-container border border-outline-variant/30 rounded-xl p-6 flex flex-col">
           <h3 className="font-semibold text-on-surface mb-4 flex items-center gap-2">
             <PieChartIcon className="text-primary" size={18} />
@@ -73,17 +86,9 @@ export default function AIInsights() {
           <div className="flex-1">
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
-                <Pie
-                  data={methodStats}
-                  cx="50%"
-                  cy="50%"
-                  innerRadius={60}
-                  outerRadius={100}
-                  paddingAngle={5}
-                  dataKey="value"
-                >
+                <Pie data={methodStats} cx="50%" cy="50%" innerRadius={60} outerRadius={100} paddingAngle={5} dataKey="value">
                   {methodStats.map((entry, index) => (
-                    <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                    <Cell key={`cell-${entry.name}-${index}`} fill={COLORS[index % COLORS.length]} />
                   ))}
                 </Pie>
                 <Tooltip contentStyle={{ backgroundColor: '#1d2027', borderColor: '#424754', borderRadius: '8px' }} />
@@ -93,7 +98,6 @@ export default function AIInsights() {
           </div>
         </div>
 
-        {/* Radar Chart: Top 5 Threats */}
         <div className="bg-surface-container border border-outline-variant/30 rounded-xl p-6 flex flex-col">
           <h3 className="font-semibold text-on-surface mb-4 flex items-center gap-2">
             <ShieldCheck className="text-tertiary" size={18} />
@@ -114,6 +118,19 @@ export default function AIInsights() {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function InsightCard({ icon, title, value, tone }: { icon: React.ReactNode; title: string; value: string; tone: 'primary' | 'tertiary' | 'error' }) {
+  const toneClass = tone === 'primary' ? 'text-primary' : tone === 'tertiary' ? 'text-tertiary' : 'text-error';
+  return (
+    <div className="bg-surface-container border border-outline-variant/30 rounded-xl p-6">
+      <div className={`flex items-center gap-3 ${toneClass} mb-2`}>
+        {icon}
+        <h3 className="font-bold">{title}</h3>
+      </div>
+      <p className="text-4xl font-black text-on-surface">{value}</p>
     </div>
   );
 }
