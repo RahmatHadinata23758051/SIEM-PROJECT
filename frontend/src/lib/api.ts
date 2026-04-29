@@ -1,14 +1,24 @@
 /**
  * src/lib/api.ts
  * ──────────────────────────────────────────────────────────────────────────────
- * Hybrid SIEM — Central Data Layer (Mock Service)
+ * Aegis AI SIEM — Central Data Layer (Dual-Mode: Real API + Mock Fallback)
+ *
+ * Mode Toggle:
+ *  - USE_REAL_API = true: Consume from http://localhost:8001/api/*
+ *  - USE_REAL_API = false: Use mock data generators
  *
  * Rules:
- *  - ALL data originates here. Components MUST NOT generate their own data.
- *  - Mirrors the backend PipelineDecision contract from hybrid_siem/pipeline.py
- *  - Ready to swap: replace generators with real fetch() calls when API is live.
+ *  - ALL data must conform to SIEMEvent interface
+ *  - Mirrors PipelineDecision from hybrid_siem/pipeline.py
+ *  - WebSocket for streaming, REST for historical data
  * ──────────────────────────────────────────────────────────────────────────────
  */
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MODE TOGGLE
+// ═══════════════════════════════════════════════════════════════════════════════
+export const USE_REAL_API = true;
+export const API_BASE_URL = "http://127.0.0.1:8001";
 
 // ─── Data Contracts ───────────────────────────────────────────────────────────
 
@@ -37,6 +47,7 @@ export interface SIEMEvent {
   username_variance: number;
   failed_ratio: number;
   event_count: number;
+  total_attempts?: number;
   // Watchlist
   strike_count: number;
   repeat_incidents: number;
@@ -262,34 +273,74 @@ export function getHuntingResults(count = 10): HuntingResult[] {
   }).sort((a, b) => b.risk_score - a.risk_score);
 }
 
-// ─── Async Fetchers (Sprint 5) ────────────────────────────────────────────────
+// ─── Async Fetchers (Real API) ────────────────────────────────────────────────
 
-const API_BASE = 'http://localhost:8000/api';
+/**
+ * Fetch system metrics from real API.
+ */
+export async function fetchSystemMetricsAsync(): Promise<SystemMetrics> {
+  if (!USE_REAL_API) {
+    return getSystemMetrics();
+  }
 
-async function fetchWithFallback<T>(url: string, fallbackFn: () => T): Promise<T> {
   try {
-    const token = localStorage.getItem('siem_token');
-    const res = await fetch(`${API_BASE}${url}`, {
-      headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) }
-    });
-    if (!res.ok) throw new Error('API Error');
+    const res = await fetch(`${API_BASE_URL}/api/metrics`);
+    if (!res.ok) throw new Error(`API ${res.status}`);
     return await res.json();
   } catch (err) {
-    console.warn(`[Fallback] Failed to fetch ${url}, using mock data.`, err);
-    return fallbackFn();
+    console.warn('[API] Metrics fetch failed, using fallback:', err);
+    return getSystemMetrics();
   }
 }
 
-export async function fetchSystemMetricsAsync(): Promise<SystemMetrics> {
-  return fetchWithFallback('/metrics', getSystemMetrics);
-}
-
+/**
+ * Fetch network nodes from real API.
+ */
 export async function fetchNetworkNodesAsync(): Promise<NetworkNode[]> {
-  return fetchWithFallback('/network-nodes', () => getNetworkNodes(16));
+  if (!USE_REAL_API) {
+    return getNetworkNodes(16);
+  }
+
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/network-nodes`);
+    if (!res.ok) throw new Error(`API ${res.status}`);
+    return await res.json();
+  } catch (err) {
+    console.warn('[API] Network nodes fetch failed, using fallback:', err);
+    return getNetworkNodes(16);
+  }
 }
 
+/**
+ * Fetch hunting results from real API.
+ */
 export async function fetchHuntingResultsAsync(): Promise<HuntingResult[]> {
-  return fetchWithFallback('/hunting-results', () => getHuntingResults(15));
+  if (!USE_REAL_API) {
+    return getHuntingResults(15);
+  }
+
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/hunting-results`);
+    if (!res.ok) throw new Error(`API ${res.status}`);
+    const events = await res.json();
+    return events.map((e: any) => ({
+      ip: e.ip,
+      rule_score: e.rule_score,
+      anomaly_score: e.anomaly_score,
+      risk_score: e.risk_score,
+      risk_level: e.risk_level,
+      action: e.action,
+      strike_count: e.strike_count,
+      scoring_method: e.scoring_method,
+      reasons: e.reasons,
+      temporal_insight: e.temporal_insight,
+      first_seen: e.first_seen || e.timestamp,
+      last_seen: e.last_seen || e.timestamp,
+    }));
+  } catch (err) {
+    console.warn('[API] Hunting results fetch failed, using fallback:', err);
+    return getHuntingResults(15);
+  }
 }
 
 /** Build a live log entry string (for LogExplorer / Dashboard stream). */
@@ -314,4 +365,205 @@ export function formatLogLine(event: SIEMEvent): {
     level:   levelMap[event.risk_level],
     message: `[${event.ip}] ${actionMsg[event.action]} | risk=${event.risk_score.toFixed(0)} rule=${event.rule_score} anomaly=${event.anomaly_score.toFixed(2)} | ${event.reasons[0]}`,
   };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WEBSOCKET STREAMING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+export type StreamEventHandler = (events: SIEMEvent[]) => void;
+export type StreamErrorHandler = (error: Error) => void;
+export type StreamStatusHandler = (status: 'CONNECTING' | 'CONNECTED' | 'DISCONNECTED' | 'ERROR') => void;
+
+/**
+ * WebSocket stream manager for real-time events.
+ * 
+ * Usage:
+ *   const stream = createStreamManager();
+ *   stream.onStatus(status => console.log(status));
+ *   stream.onEvents(events => setEvents(events));
+ *   stream.connect();
+ *   // ... later
+ *   stream.disconnect();
+ */
+export class SIEMStreamManager {
+  private ws: WebSocket | null = null;
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 5;
+  private reconnectDelay = 3000;
+  private eventHandlers: StreamEventHandler[] = [];
+  private statusHandlers: StreamStatusHandler[] = [];
+  private errorHandlers: StreamErrorHandler[] = [];
+  private mockIntervalId: number | null = null;
+
+  constructor(private useRealApi = USE_REAL_API) {}
+
+  /**
+   * Subscribe to stream events.
+   */
+  onEvents(handler: StreamEventHandler): () => void {
+    this.eventHandlers.push(handler);
+    return () => {
+      this.eventHandlers = this.eventHandlers.filter(h => h !== handler);
+    };
+  }
+
+  /**
+   * Subscribe to connection status changes.
+   */
+  onStatus(handler: StreamStatusHandler): () => void {
+    this.statusHandlers.push(handler);
+    return () => {
+      this.statusHandlers = this.statusHandlers.filter(h => h !== handler);
+    };
+  }
+
+  /**
+   * Subscribe to errors.
+   */
+  onError(handler: StreamErrorHandler): () => void {
+    this.errorHandlers.push(handler);
+    return () => {
+      this.errorHandlers = this.errorHandlers.filter(h => h !== handler);
+    };
+  }
+
+  /**
+   * Connect to stream (real WebSocket or mock polling).
+   */
+  connect(): void {
+    if (!this.useRealApi) {
+      this.connectMock();
+      return;
+    }
+
+    this.notifyStatus('CONNECTING');
+
+    const wsUrl = `ws://127.0.0.1:8001/api/stream`;
+
+    this.ws = new WebSocket(wsUrl);
+
+    this.ws.onopen = () => {
+      console.log('[Stream] Connected to WebSocket');
+      this.reconnectAttempts = 0;
+      this.notifyStatus('CONNECTED');
+    };
+
+    this.ws.onmessage = (event) => {
+      try {
+        const message = JSON.parse(event.data);
+        if (message.data && Array.isArray(message.data)) {
+          this.notifyEvents(message.data);
+        }
+      } catch (error) {
+        console.error('[Stream] Failed to parse message:', error);
+      }
+    };
+
+    this.ws.onerror = (error) => {
+      console.error('[Stream] WebSocket error:', error);
+      this.notifyError(new Error('WebSocket error'));
+      this.notifyStatus('ERROR');
+    };
+
+    this.ws.onclose = () => {
+      console.log('[Stream] WebSocket closed');
+      this.notifyStatus('DISCONNECTED');
+      this.attemptReconnect();
+    };
+  }
+
+  /**
+   * Mock streaming (polling-based for development/fallback).
+   */
+  private connectMock(): void {
+    console.log('[Stream] Using mock streaming');
+    this.notifyStatus('CONNECTED');
+
+    this.mockIntervalId = window.setInterval(() => {
+      const events = generateEventBatch(1);
+      this.notifyEvents(events);
+    }, 2000) as unknown as number;
+  }
+
+  /**
+   * Attempt to reconnect with exponential backoff.
+   */
+  private attemptReconnect(): void {
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      this.notifyError(new Error('Max reconnection attempts exceeded'));
+      this.notifyStatus('ERROR');
+      return;
+    }
+
+    this.reconnectAttempts++;
+    const delay = this.reconnectDelay * Math.pow(1.5, this.reconnectAttempts - 1);
+
+    console.log(`[Stream] Reconnecting in ${Math.round(delay)}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+
+    setTimeout(() => this.connect(), delay);
+  }
+
+  /**
+   * Disconnect from stream.
+   */
+  disconnect(): void {
+    if (this.ws) {
+      this.ws.close();
+      this.ws = null;
+    }
+
+    if (this.mockIntervalId !== null) {
+      clearInterval(this.mockIntervalId);
+      this.mockIntervalId = null;
+    }
+
+    this.notifyStatus('DISCONNECTED');
+  }
+
+  /**
+   * Check if connected.
+   */
+  isConnected(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN || this.mockIntervalId !== null;
+  }
+
+  // ─── Notify Subscribers ────────────────────────────────────────────────────
+
+  private notifyEvents(events: SIEMEvent[]): void {
+    for (const handler of this.eventHandlers) {
+      try {
+        handler(events);
+      } catch (error) {
+        console.error('[Stream] Error in event handler:', error);
+      }
+    }
+  }
+
+  private notifyStatus(status: 'CONNECTING' | 'CONNECTED' | 'DISCONNECTED' | 'ERROR'): void {
+    for (const handler of this.statusHandlers) {
+      try {
+        handler(status);
+      } catch (error) {
+        console.error('[Stream] Error in status handler:', error);
+      }
+    }
+  }
+
+  private notifyError(error: Error): void {
+    for (const handler of this.errorHandlers) {
+      try {
+        handler(error);
+      } catch (e) {
+        console.error('[Stream] Error in error handler:', e);
+      }
+    }
+  }
+}
+
+/**
+ * Create a new stream manager instance.
+ */
+export function createStreamManager(): SIEMStreamManager {
+  return new SIEMStreamManager(USE_REAL_API);
 }

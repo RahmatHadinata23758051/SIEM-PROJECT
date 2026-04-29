@@ -9,6 +9,7 @@ import {
   generateEventBatch,
   fetchSystemMetricsAsync,
   getTelemetryHistory,
+  createStreamManager,
   type SIEMEvent,
   type SystemMetrics,
   type TelemetryPoint,
@@ -63,6 +64,7 @@ export function SIEMProvider({
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('CONNECTING');
 
   const wsRef = useRef<WebSocket | null>(null);
+  const streamRef = useRef<any>(null);
   const reconnectTimeoutRef = useRef<number | null>(null);
   const reconnectAttemptsRef = useRef(0);
 
@@ -71,7 +73,7 @@ export function SIEMProvider({
       const newMetrics = await fetchSystemMetricsAsync();
       setMetrics(newMetrics);
     } catch (e) {
-      console.error(e);
+      console.error('[Stream] Metrics refresh error:', e);
     }
     setLastUpdated(new Date());
   }, []);
@@ -87,74 +89,66 @@ export function SIEMProvider({
 
   useEffect(() => {
     if (!isStreaming) {
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
+      if (streamRef.current) {
+        streamRef.current.disconnect();
+        streamRef.current = null;
       }
       setConnectionStatus('DISCONNECTED');
       return;
     }
 
-    const connectWs = () => {
-      setConnectionStatus('CONNECTING');
-      const ws = new WebSocket('ws://localhost:8000/api/events');
-      
-      ws.onopen = () => {
-        setConnectionStatus('CONNECTED');
-        reconnectAttemptsRef.current = 0;
-      };
+    // Create new stream manager
+    const stream = createStreamManager();
+    streamRef.current = stream;
 
-      ws.onmessage = (event) => {
-        try {
-          const payload = JSON.parse(event.data);
-          if (payload.type === 'initial_batch') {
-            setEvents(payload.data.slice(0, maxEvents));
-          } else if (payload.type === 'events_batch') {
-            setEvents(prev => {
-              const newEvents = payload.data.reverse();
-              return [...newEvents, ...prev].slice(0, maxEvents);
-            });
-            refresh(); // refresh metrics on new events
-            
-            // Append telemetry roughly
-            const now = new Date();
-            const label = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-            setTelemetry(prev => {
-              if (prev.length > 0 && prev[prev.length-1].time === label) return prev;
-              return [
-                ...prev.slice(-11),
-                { time: label, volume: Math.floor(Math.random() * 4500 + 1500), risk: Math.floor(Math.random() * 9000 + 800) },
-              ];
-            });
-          }
-          setLastUpdated(new Date());
-        } catch (e) {
-          console.error("Failed to parse WS message", e);
-        }
-      };
+    // Subscribe to status changes
+    const unsubscribeStatus = stream.onStatus((status) => {
+      setConnectionStatus(status as ConnectionStatus);
+    });
 
-      ws.onclose = () => {
-        setConnectionStatus('ERROR');
-        wsRef.current = null;
-        
-        // Exponential backoff reconnect
-        const backoff = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 30000);
-        reconnectAttemptsRef.current += 1;
-        reconnectTimeoutRef.current = window.setTimeout(connectWs, backoff);
-      };
+    // Subscribe to events
+    const unsubscribeEvents = stream.onEvents((newEvents) => {
+      setEvents((prev) => {
+        const combined = [...newEvents, ...prev];
+        return combined.slice(0, maxEvents);
+      });
 
-      ws.onerror = () => {
-        setConnectionStatus('ERROR');
-      };
+      refresh(); // Refresh metrics on new events
 
-      wsRef.current = ws;
-    };
+      // Update telemetry
+      const now = new Date();
+      const label = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+      setTelemetry((prev) => {
+        if (prev.length > 0 && prev[prev.length - 1].time === label) return prev;
+        return [
+          ...prev.slice(-11),
+          {
+            time: label,
+            volume: Math.floor(Math.random() * 4500 + 1500),
+            risk: Math.floor(Math.random() * 9000 + 800),
+          },
+        ];
+      });
 
-    connectWs();
+      setLastUpdated(new Date());
+    });
 
+    // Subscribe to errors
+    const unsubscribeError = stream.onError((error) => {
+      console.error('[Stream] Connection error:', error);
+      setConnectionStatus('ERROR');
+    });
+
+    // Connect
+    stream.connect();
+
+    // Cleanup
     return () => {
-      if (wsRef.current) wsRef.current.close();
-      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+      unsubscribeStatus();
+      unsubscribeEvents();
+      unsubscribeError();
+      stream.disconnect();
+      streamRef.current = null;
     };
   }, [isStreaming, maxEvents, refresh]);
 
